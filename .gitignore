@@ -1,0 +1,9 @@
+# Credenciais e estado local — nunca versionar
+.env
+.sync_state.json
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
