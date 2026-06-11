@@ -1,6 +1,11 @@
 {
-  "restrict_to_mapped_projects": false,
-  "projects": [],
+  "restrict_to_mapped_projects": true,
+  "projects": [
+    {
+      "odoo": "Alvorada - Melhorias NDF",
+      "jira": ["AMN"]
+    }
+  ],
   "users": [
     {
       "jira": "diego@dexterityit.com.br",
