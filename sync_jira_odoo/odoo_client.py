@@ -3,11 +3,26 @@
 from __future__ import annotations
 
 import xmlrpc.client
-from typing import Any
+from typing import Any, Callable
 
 
 class OdooError(RuntimeError):
     pass
+
+
+def _guarded(description: str, call: Callable[[], Any]) -> Any:
+    """Converte falhas de transporte/servidor em OdooError legível."""
+    try:
+        return call()
+    except xmlrpc.client.Fault as exc:
+        raise OdooError(f"{description}: erro do servidor Odoo: {exc.faultString}") from exc
+    except xmlrpc.client.ProtocolError as exc:
+        raise OdooError(
+            f"{description}: HTTP {exc.errcode} {exc.errmsg} em {exc.url} "
+            "(verifique a URL e o acesso de rede ao Odoo)"
+        ) from exc
+    except OSError as exc:
+        raise OdooError(f"{description}: erro de rede: {exc}") from exc
 
 
 class OdooClient:
@@ -20,12 +35,15 @@ class OdooClient:
         self._uid: int | None = None
 
     def version(self) -> dict:
-        return self._common.version()
+        return _guarded("common.version()", self._common.version)
 
     @property
     def uid(self) -> int:
         if self._uid is None:
-            uid = self._common.authenticate(self._db, self._login, self._api_key, {})
+            uid = _guarded(
+                "authenticate()",
+                lambda: self._common.authenticate(self._db, self._login, self._api_key, {}),
+            )
             if not uid:
                 raise OdooError(
                     f"falha de autenticação no Odoo (db={self._db}, user={self._login})"
@@ -34,8 +52,11 @@ class OdooClient:
         return self._uid
 
     def execute(self, model: str, method: str, *args: Any, **kwargs: Any) -> Any:
-        return self._object.execute_kw(
-            self._db, self.uid, self._api_key, model, method, list(args), kwargs
+        return _guarded(
+            f"{model}.{method}",
+            lambda: self._object.execute_kw(
+                self._db, self.uid, self._api_key, model, method, list(args), kwargs
+            ),
         )
 
     def search_read(
