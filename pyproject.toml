@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "syncjiraodoo"
+version = "0.1.0"
+description = "Sync utilities between Jira and Odoo."
+readme = "README.md"
+requires-python = ">=3.9"
+# No third-party runtime dependencies: Odoo uses stdlib xmlrpc.client and
+# Jira uses stdlib urllib.
+dependencies = []
+
+[project.scripts]
+syncjiraodoo = "syncjiraodoo.cli:main"
+
+[tool.setuptools]
+packages = ["syncjiraodoo"]
