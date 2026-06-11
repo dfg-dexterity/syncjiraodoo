@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sync-jira-odoo"
+version = "0.1.0"
+description = "Sincroniza worklogs do Jira (Clockwork) para timesheets do Odoo"
+requires-python = ">=3.10"
+
+[project.scripts]
+sync-jira-odoo = "sync_jira_odoo.__main__:main"
+
+[tool.setuptools]
+packages = ["sync_jira_odoo"]
