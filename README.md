@@ -46,6 +46,56 @@ carregue no shell (`set -a; source .env; set +a`).
 | `JIRA_ODOO_PROJECT_MAP` | não | JSON key Jira → nome exato do projeto no Odoo |
 | `JIRA_ODOO_EMPLOYEE_MAP` | não | JSON accountId/e-mail Jira → e-mail do funcionário no Odoo |
 | `DEFAULT_EMPLOYEE_EMAIL` | não | funcionário usado quando o autor não for resolvido |
+| `MAPPING_FILE` | não | caminho da tabela de-para (padrão: `mapping.json`) |
+
+## Tabela de-para (`mapping.json`)
+
+A forma recomendada de configurar os mapeamentos é o arquivo **`mapping.json`**
+(versionável — não contém segredos), editável à mão ou pela interface web:
+
+```json
+{
+  "restrict_to_mapped_projects": false,
+  "projects": [
+    { "odoo": "Casa dos Ventos", "jira": ["CDV", "CCDV"] }
+  ],
+  "users": [
+    { "jira": "diego@dexterityit.com.br", "odoo": "diego@dexterityit.com.br",
+      "nome": "Diego Gozer" }
+  ]
+}
+```
+
+- **Projetos N:1** — uma linha aceita várias keys Jira apontando para o mesmo
+  projeto Odoo (ex.: o projeto greenfield `CDV` e o AMS `CCDV` consolidando em
+  "Casa dos Ventos").
+- **Usuários** — a coluna `jira` aceita e-mail ou `accountId` (necessário
+  quando o perfil Atlassian oculta o e-mail).
+- **`restrict_to_mapped_projects`** — com `true`, só os projetos mapeados são
+  sincronizados (a menos que `JIRA_PROJECT_KEYS`/`--projects` digam outra coisa).
+- O arquivo tem precedência sobre `JIRA_ODOO_PROJECT_MAP` /
+  `JIRA_ODOO_EMPLOYEE_MAP`, que continuam funcionando.
+
+## Interface web de monitoramento
+
+```bash
+python3 -m sync_jira_odoo.web --port 8765
+# abra http://127.0.0.1:8765/
+```
+
+Na interface você pode:
+
+- **editar as tabelas de-para** de projetos e usuários (com validação) e
+  salvar direto no `mapping.json`;
+- **testar as conexões** com Odoo e Jira;
+- **disparar um dry-run ou a sincronização**, com data inicial opcional e
+  propagação de exclusões opt-in;
+- **monitorar**: status em tempo real, histórico das últimas execuções
+  (criados/atualizados/pulados/removidos/avisos — inclusive das execuções via
+  cron, que gravam no mesmo `.sync_history.json`), avisos da última execução
+  e o log ao vivo.
+
+A interface não tem autenticação: mantenha-a em `127.0.0.1` ou rede interna.
 
 ## Uso
 

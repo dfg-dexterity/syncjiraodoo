@@ -1,6 +1,7 @@
 # Credenciais e estado local — nunca versionar
 .env
 .sync_state.json
+.sync_history.json
 
 # Python
 __pycache__/

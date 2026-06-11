@@ -1,0 +1,26 @@
+{
+  "restrict_to_mapped_projects": false,
+  "projects": [],
+  "users": [
+    {
+      "jira": "diego@dexterityit.com.br",
+      "odoo": "diego@dexterityit.com.br",
+      "nome": "Diego Gozer"
+    },
+    {
+      "jira": "julian@dexterityit.com.br",
+      "odoo": "julian@dexterityit.com.br",
+      "nome": "Julian Cidade"
+    },
+    {
+      "jira": "jessica@dexterityit.com.br",
+      "odoo": "jessica@dexterityit.com.br",
+      "nome": "Jéssica Cavalheiro"
+    },
+    {
+      "jira": "wilian@dexterityit.com.br",
+      "odoo": "wilian@dexterityit.com.br",
+      "nome": "Wilian Geanino Santos"
+    }
+  ]
+}

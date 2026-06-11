@@ -56,6 +56,14 @@ class Config:
     # E-mail de funcionário usado quando o autor não pôde ser resolvido.
     default_employee_email: str = ""
 
+    def apply_mapping(self, mapping) -> None:
+        """Mescla uma tabela de-para (mapping.json); o arquivo tem precedência
+        sobre os mapas vindos de variáveis de ambiente."""
+        self.project_map.update(mapping.project_map())
+        self.employee_map.update(mapping.employee_map())
+        if mapping.restrict_to_mapped_projects and not self.jira_project_keys:
+            self.jira_project_keys = sorted(mapping.project_map())
+
     @classmethod
     def from_env(cls) -> "Config":
         keys_raw = os.environ.get("JIRA_PROJECT_KEYS", "")

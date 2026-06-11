@@ -36,6 +36,20 @@ def parse_started(started: str) -> datetime:
     return datetime.strptime(started, "%Y-%m-%dT%H:%M:%S.%f%z")
 
 
+def connection_report(config: Config) -> str:
+    """Valida as credenciais do Odoo e do Jira e devolve um resumo legível."""
+    odoo = OdooClient(config.odoo_url, config.odoo_db, config.odoo_user, config.odoo_api_key)
+    version = odoo.version()
+    lines = [
+        f"Odoo: {version.get('server_version')} (série {version.get('server_serie')})",
+        f"Odoo authenticate(): OK, uid={odoo.uid}",
+    ]
+    jira = JiraClient(config.jira_url, config.jira_user, config.jira_api_token)
+    me = jira.myself()
+    lines.append(f"Jira: autenticado como {me.get('displayName')} ({me.get('emailAddress')})")
+    return "\n".join(lines)
+
+
 def _m2o_id(value) -> int | None:
     """Normaliza um many2one do Odoo (False, int ou [id, label]) para id."""
     if isinstance(value, (list, tuple)):
