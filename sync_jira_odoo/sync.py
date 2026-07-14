@@ -197,6 +197,15 @@ class SyncEngine:
 
     # ------------------------------------------------------ projeto / tarefa
 
+    def _search_active_first(self, model: str, domain: list, fields: list[str]) -> list[dict]:
+        """Busca registros ativos e, se nada for encontrado, inclui os
+        arquivados — o histórico de projetos/funcionários arquivados no Odoo
+        continua válido para receber timesheets."""
+        rows = self.odoo.search_read(model, domain, fields, limit=1)
+        if not rows:
+            rows = self.odoo.search_read(model, domain, fields, limit=1, include_archived=True)
+        return rows
+
     def _ensure_project(
         self, key: str, jira_name: str, result: SyncResult, dry_run: bool
     ) -> int | None:
@@ -205,19 +214,19 @@ class SyncEngine:
 
         mapped_name = self.cfg.project_map.get(key)
         if mapped_name:
-            rows = self.odoo.search_read(
-                "project.project", [("name", "=", mapped_name)], ["name"], limit=1
+            rows = self._search_active_first(
+                "project.project", [("name", "=", mapped_name)], ["name"]
             )
             project_id = rows[0]["id"] if rows else None
             if project_id is None:
                 result.warn(
                     f"projeto Jira {key} mapeado para '{mapped_name}', mas esse "
-                    "projeto não existe no Odoo; worklogs serão pulados"
+                    "projeto não existe no Odoo (nem arquivado); worklogs serão pulados"
                 )
         else:
             marker = f"[{key}]"
-            rows = self.odoo.search_read(
-                "project.project", [("name", "like", marker)], ["name"], limit=1
+            rows = self._search_active_first(
+                "project.project", [("name", "like", marker)], ["name"]
             )
             if rows:
                 project_id = rows[0]["id"]
@@ -239,11 +248,10 @@ class SyncEngine:
             return self._task_cache[issue_key]
 
         marker = f"[{issue_key}]"
-        rows = self.odoo.search_read(
+        rows = self._search_active_first(
             "project.task",
             [("project_id", "=", project_id), ("name", "like", marker)],
             ["name"],
-            limit=1,
         )
         if rows:
             task_id = rows[0]["id"]
@@ -287,17 +295,17 @@ class SyncEngine:
         return employee_id
 
     def _find_employee(self, email: str) -> int | None:
-        rows = self.odoo.search_read(
-            "hr.employee", [("work_email", "=ilike", email)], ["name"], limit=1
+        """Prefere funcionários ativos; ex-funcionários (arquivados) ainda
+        valem — o histórico de horas deles precisa continuar entrando."""
+        rows = self._search_active_first(
+            "hr.employee", [("work_email", "=ilike", email)], ["name"]
         )
         if rows:
             return rows[0]["id"]
-        users = self.odoo.search_read(
-            "res.users", [("login", "=ilike", email)], ["name"], limit=1
-        )
+        users = self._search_active_first("res.users", [("login", "=ilike", email)], ["name"])
         if users:
-            rows = self.odoo.search_read(
-                "hr.employee", [("user_id", "=", users[0]["id"])], ["name"], limit=1
+            rows = self._search_active_first(
+                "hr.employee", [("user_id", "=", users[0]["id"])], ["name"]
             )
             if rows:
                 return rows[0]["id"]

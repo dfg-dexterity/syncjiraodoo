@@ -33,8 +33,12 @@ class FakeOdoo:
                 raise NotImplementedError(f"operador não suportado no fake: {op}")
         return True
 
-    def search_read(self, model, domain, fields, limit=None):
-        rows = [dict(r) for r in self.data.get(model, []) if self._match(r, domain)]
+    def search_read(self, model, domain, fields, limit=None, include_archived=False):
+        rows = [
+            dict(r)
+            for r in self.data.get(model, [])
+            if self._match(r, domain) and (include_archived or r.get("active", True))
+        ]
         return rows[:limit] if limit else rows
 
     def create(self, model, vals):
