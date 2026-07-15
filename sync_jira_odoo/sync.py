@@ -20,7 +20,7 @@ from datetime import datetime
 
 from .config import Config
 from .jira_client import JiraClient, adf_to_text
-from .odoo_client import OdooClient
+from .odoo_client import OdooClient, OdooError
 
 log = logging.getLogger("sync_jira_odoo")
 
@@ -92,8 +92,19 @@ class SyncEngine:
 
         ids = self.jira.updated_worklog_ids(since_ms)
         log.info("worklogs alterados desde %s: %d", since.isoformat(), len(ids))
+        consecutive_errors = 0
         for worklog in self.jira.get_worklogs(ids):
-            self._sync_worklog(worklog, result, dry_run)
+            try:
+                self._sync_worklog(worklog, result, dry_run)
+                consecutive_errors = 0
+            except OdooError as exc:
+                # um worklog problemático não pode derrubar a carga inteira;
+                # só aborta se o Odoo falhar repetidamente (problema sistêmico)
+                consecutive_errors += 1
+                result.warn(f"worklog {worklog.get('id')} pulado por erro do Odoo: {exc}")
+                result.skipped += 1
+                if consecutive_errors >= 20:
+                    raise
 
         deleted_ids = self.jira.deleted_worklog_ids(since_ms)
         if deleted_ids:
@@ -281,32 +292,45 @@ class SyncEngine:
             or jira_email
         )
 
-        employee_id = self._find_employee(email) if email else None
-        if employee_id is None and self.cfg.default_employee_email:
-            employee_id = self._find_employee(self.cfg.default_employee_email)
-        if employee_id is None:
+        employee = self._find_employee(email) if email else None
+        if employee is None and self.cfg.default_employee_email:
+            employee = self._find_employee(self.cfg.default_employee_email)
+
+        if employee is None:
+            employee_id = None
             result.warn(
                 f"autor Jira sem funcionário correspondente no Odoo: "
                 f"{author.get('displayName', '?')} (accountId={account_id}, "
                 f"email={jira_email or 'oculto'}); mapeie em JIRA_ODOO_EMPLOYEE_MAP"
             )
+        elif not employee.get("active", True):
+            # o Odoo proíbe criar timesheet para funcionário arquivado
+            employee_id = None
+            result.warn(
+                f"funcionário '{employee['name']}' ({email}) está arquivado no Odoo "
+                "e o Odoo não permite criar timesheets para arquivados; para importar "
+                "o histórico, reative-o temporariamente, rode o sync e arquive de novo "
+                "— worklogs pulados por enquanto"
+            )
+        else:
+            employee_id = employee["id"]
 
         self._employee_cache[account_id] = employee_id
         return employee_id
 
-    def _find_employee(self, email: str) -> int | None:
-        """Prefere funcionários ativos; ex-funcionários (arquivados) ainda
-        valem — o histórico de horas deles precisa continuar entrando."""
+    def _find_employee(self, email: str) -> dict | None:
+        """Prefere funcionários ativos; um arquivado ainda é devolvido (com
+        active=False) para o chamador avisar com nome e sobrenome."""
         rows = self._search_active_first(
-            "hr.employee", [("work_email", "=ilike", email)], ["name"]
+            "hr.employee", [("work_email", "=ilike", email)], ["name", "active"]
         )
         if rows:
-            return rows[0]["id"]
+            return rows[0]
         users = self._search_active_first("res.users", [("login", "=ilike", email)], ["name"])
         if users:
             rows = self._search_active_first(
-                "hr.employee", [("user_id", "=", users[0]["id"])], ["name"]
+                "hr.employee", [("user_id", "=", users[0]["id"])], ["name", "active"]
             )
             if rows:
-                return rows[0]["id"]
+                return rows[0]
         return None

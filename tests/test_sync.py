@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from sync_jira_odoo.config import Config
 from sync_jira_odoo.jira_client import adf_to_text
+from sync_jira_odoo.odoo_client import OdooError
 from sync_jira_odoo.sync import SyncEngine
 
 from .fakes import FakeJira, FakeOdoo, make_issue, make_worklog
@@ -146,8 +147,9 @@ class SyncEngineTest(unittest.TestCase):
         self.assertEqual(len(result.warnings), 1)
         self.assertIn("ninguem@exemplo.com", result.warnings[0])
 
-    def test_archived_employee_still_receives_timesheets(self):
-        # ex-funcionária: ficha arquivada no Odoo, mas o histórico deve entrar
+    def test_archived_employee_warns_and_skips_without_aborting(self):
+        # o Odoo proíbe timesheet de funcionário arquivado: avisa (com o nome)
+        # e pula, em vez de deixar o servidor abortar a carga inteira
         self.odoo.data["hr.employee"] = [
             {
                 "id": 12,
@@ -159,9 +161,27 @@ class SyncEngineTest(unittest.TestCase):
         ]
         self.jira.worklogs["27279"] = make_worklog(author_email="ana@dexterityit.com.br")
         result = self.engine.run(SINCE)
-        self.assertEqual(result.created, 1)
-        self.assertEqual(result.warnings, [])
-        self.assertEqual(self.odoo.data["account.analytic.line"][0]["employee_id"], 12)
+        self.assertEqual((result.created, result.skipped), (0, 1))
+        self.assertEqual(len(result.warnings), 1)
+        self.assertIn("Ana Luiza de Souza", result.warnings[0])
+        self.assertIn("arquivado", result.warnings[0])
+        self.assertNotIn("account.analytic.line", self.odoo.data)
+
+    def test_odoo_error_in_one_worklog_does_not_abort_run(self):
+        # simula a recusa do servidor (ex.: "funcionário ativo exigido") em um
+        # worklog: o run continua e o problema vira aviso + pulado
+        original_create = self.odoo.create
+
+        def flaky_create(model, vals):
+            if model == "account.analytic.line":
+                raise OdooError("Planilhas devem ser criadas com um funcionário ativo")
+            return original_create(model, vals)
+
+        self.odoo.create = flaky_create
+        result = self.engine.run(SINCE)
+        self.assertEqual((result.created, result.skipped), (0, 1))
+        self.assertEqual(len(result.warnings), 1)
+        self.assertIn("funcionário ativo", result.warnings[0])
 
     def test_active_employee_preferred_over_archived_with_same_email(self):
         self.odoo.data["hr.employee"] = [
