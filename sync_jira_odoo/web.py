@@ -18,6 +18,7 @@ import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from . import storage
 from .config import Config, ConfigError
@@ -42,10 +43,17 @@ class _BufferHandler(logging.Handler):
 class SyncRunner:
     """Executa o sync em uma thread de fundo, capturando o log para a UI."""
 
-    def __init__(self, mapping_path: Path, state_path: Path, history_path: Path):
+    def __init__(
+        self,
+        mapping_path: Path,
+        state_path: Path,
+        history_path: Path,
+        import_log_path: Path | None = None,
+    ):
         self.mapping_path = mapping_path
         self.state_path = state_path
         self.history_path = history_path
+        self.import_log_path = import_log_path or Path(storage.DEFAULT_IMPORT_LOG_FILE)
         self.lock = threading.Lock()
         self.running = False
         self.log_buffer: collections.deque[str] = collections.deque(maxlen=400)
@@ -102,6 +110,7 @@ class SyncRunner:
                 ok=True,
             )
             if not dry_run:
+                storage.append_import_items(self.import_log_path, result.items)
                 storage.save_state(self.state_path, run_started)
         except Exception as exc:  # mostra qualquer falha no monitor
             log.error("%s", exc)
@@ -146,6 +155,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/api/import-log"):
+            query = parse_qs(urlparse(self.path).query)
+            try:
+                limit = min(int(query.get("limit", ["500"])[0]), 2000)
+            except ValueError:
+                limit = 500
+            entries = storage.read_import_log(runner.import_log_path, limit)
+            self._send_json({"items": list(reversed(entries))})
         elif self.path == "/api/state":
             mapping = Mapping.load(runner.mapping_path)
             history = storage.read_history(runner.history_path)
@@ -272,6 +289,19 @@ para o mesmo projeto Odoo</span></h2>
 </table>
 <h2>Log da última execução</h2>
 <pre id="log"></pre>
+
+<h2>Importados no Odoo <span class="muted">últimos registros gravados
+(dry-run não entra aqui)</span></h2>
+<p>
+  <input type="text" id="implogFilter" placeholder="filtrar por issue, autor, texto…"
+         style="padding:.35rem .55rem; min-width: 260px;">
+  <button onclick="loadImportLog()">↻ atualizar</button>
+</p>
+<table id="implogTable">
+  <thead><tr><th>Gravado em (local)</th><th>Ação</th><th>Issue</th>
+  <th>Data</th><th>Horas</th><th>Autor</th><th>Descrição</th></tr></thead>
+  <tbody></tbody>
+</table>
 
 <script>
 let mappingLoaded = false;
@@ -417,6 +447,41 @@ function renderHistory(history) {
   }
 }
 
+let importLog = [];
+
+async function loadImportLog() {
+  try {
+    const res = await fetch("/api/import-log?limit=500");
+    importLog = (await res.json()).items || [];
+    renderImportLog();
+  } catch (e) { /* servidor ocupado; o botão ↻ tenta de novo */ }
+}
+
+function renderImportLog() {
+  const filter = (document.getElementById("implogFilter").value || "").toLowerCase();
+  const body = document.querySelector("#implogTable tbody");
+  body.innerHTML = "";
+  for (const it of importLog) {
+    const hay = [it.issue, it.autor, it.descricao, it.acao, it.data]
+      .filter(Boolean).join(" ").toLowerCase();
+    if (filter && !hay.includes(filter)) continue;
+    const tr = el("tr");
+    tr.appendChild(el("td", {}, it.logged_utc
+      ? new Date(it.logged_utc).toLocaleString() : "—"));
+    tr.appendChild(el("td", {}, it.acao || "—"));
+    tr.appendChild(el("td", {}, it.issue || (it.worklog ? "worklog " + it.worklog : "—")));
+    tr.appendChild(el("td", {}, it.data || "—"));
+    tr.appendChild(el("td", {}, it.horas != null ? String(it.horas) : "—"));
+    tr.appendChild(el("td", {}, it.autor || "—"));
+    tr.appendChild(el("td", {}, it.descricao || "—"));
+    body.appendChild(tr);
+  }
+}
+
+document.getElementById("implogFilter").addEventListener("input", renderImportLog);
+
+let wasRunning = false;
+
 async function refresh() {
   try {
     const state = await (await fetch("/api/state")).json();
@@ -426,10 +491,13 @@ async function refresh() {
     if (!mappingLoaded) { renderMapping(state.mapping); mappingLoaded = true; }
     renderHistory(state.history);
     document.getElementById("log").textContent = state.log.join("\\n");
+    if (wasRunning && !state.running) loadImportLog();
+    wasRunning = state.running;
   } catch (e) { /* servidor reiniciando; tenta de novo no próximo ciclo */ }
 }
 
 refresh();
+loadImportLog();
 setInterval(refresh, 2500);
 </script>
 </body>
@@ -447,10 +515,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mapping-file", default="mapping.json")
     parser.add_argument("--state-file", default=storage.DEFAULT_STATE_FILE)
     parser.add_argument("--history-file", default=storage.DEFAULT_HISTORY_FILE)
+    parser.add_argument("--import-log-file", default=storage.DEFAULT_IMPORT_LOG_FILE)
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    runner = SyncRunner(Path(args.mapping_file), Path(args.state_file), Path(args.history_file))
+    runner = SyncRunner(
+        Path(args.mapping_file),
+        Path(args.state_file),
+        Path(args.history_file),
+        Path(args.import_log_file),
+    )
     server = App((args.host, args.port), runner)
     print(f"Monitor disponível em http://{args.host}:{server.server_address[1]}/")
     try:

@@ -64,6 +64,8 @@ class SyncResult:
     skipped: int = 0
     deleted: int = 0
     warnings: list[str] = field(default_factory=list)
+    # um registro por timesheet criado/atualizado/removido, para auditoria
+    items: list[dict] = field(default_factory=list)
 
     def warn(self, message: str) -> None:
         self.warnings.append(message)
@@ -170,11 +172,20 @@ class SyncEngine:
             result.skipped += 1
             return
 
+        autor = worklog["author"].get("displayName", "")
         if not existing:
             log.info("criando timesheet: %s %s (%sh)", issue_key, vals["date"], vals["unit_amount"])
             if not dry_run:
                 self.odoo.create("account.analytic.line", vals)
             result.created += 1
+            result.items.append({
+                "acao": "criado",
+                "issue": issue_key,
+                "data": vals["date"],
+                "horas": vals["unit_amount"],
+                "autor": autor,
+                "descricao": description[:120],
+            })
             return
 
         line = existing[0]
@@ -188,6 +199,15 @@ class SyncEngine:
             if not dry_run:
                 self.odoo.write("account.analytic.line", [line["id"]], changed)
             result.updated += 1
+            result.items.append({
+                "acao": "atualizado",
+                "issue": issue_key,
+                "data": vals["date"],
+                "horas": vals["unit_amount"],
+                "autor": autor,
+                "descricao": description[:120],
+                "campos": sorted(changed),
+            })
         else:
             result.skipped += 1
 
@@ -205,6 +225,12 @@ class SyncEngine:
             if not dry_run:
                 self.odoo.unlink("account.analytic.line", ids)
             result.deleted += len(ids)
+            for line in lines:
+                result.items.append({
+                    "acao": "removido",
+                    "worklog": w_id,
+                    "descricao": str(line.get("name", ""))[:120],
+                })
 
     # ------------------------------------------------------ projeto / tarefa
 

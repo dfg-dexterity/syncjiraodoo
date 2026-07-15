@@ -66,6 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=storage.DEFAULT_HISTORY_FILE,
         help=f"histórico de execuções para o monitor (padrão: {storage.DEFAULT_HISTORY_FILE})",
     )
+    parser.add_argument(
+        "--import-log-file",
+        default=storage.DEFAULT_IMPORT_LOG_FILE,
+        help="log persistente dos timesheets importados no Odoo "
+        f"(padrão: {storage.DEFAULT_IMPORT_LOG_FILE}; dry-run não grava)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="log detalhado")
     return parser
 
@@ -135,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             },
         )
         if not args.dry_run:
+            storage.append_import_items(Path(args.import_log_file), result.items)
             storage.save_state(state_path, run_started)
         return 0
     except (OdooError, JiraError) as exc:

@@ -21,7 +21,10 @@ class WebTest(unittest.TestCase):
         Mapping(projects=[{"odoo": "Casa dos Ventos", "jira": ["CDV"]}]).save(self.mapping_path)
         storage.append_history(base / "history.json", {"ok": True, "created": 3})
 
-        self.runner = SyncRunner(self.mapping_path, base / "state.json", base / "history.json")
+        self.import_log_path = base / "import_log.jsonl"
+        self.runner = SyncRunner(
+            self.mapping_path, base / "state.json", base / "history.json", self.import_log_path
+        )
         self.server = App(("127.0.0.1", 0), self.runner)
         self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -76,6 +79,29 @@ class WebTest(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         saved = Mapping.load(self.mapping_path)  # arquivo não foi sobrescrito
         self.assertEqual(saved.project_map(), {"CDV": "Casa dos Ventos"})
+
+    def test_import_log_endpoint_returns_recent_items_first(self):
+        storage.append_import_items(
+            self.import_log_path,
+            [
+                {"acao": "criado", "issue": "CDV-1", "data": "2026-06-01", "horas": 1.0},
+                {"acao": "criado", "issue": "CDV-2", "data": "2026-06-02", "horas": 0.5},
+            ],
+        )
+        status, data = self._request("/api/import-log?limit=10")
+        self.assertEqual(status, 200)
+        issues = [item["issue"] for item in data["items"]]
+        self.assertEqual(issues, ["CDV-2", "CDV-1"])  # mais recentes primeiro
+        self.assertIn("logged_utc", data["items"][0])
+
+    def test_import_log_empty_when_file_missing(self):
+        status, data = self._request("/api/import-log")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["items"], [])
+
+    def test_index_has_import_log_section(self):
+        with urllib.request.urlopen(self.base_url + "/") as resp:
+            self.assertIn("Importados no Odoo", resp.read().decode())
 
     def test_sync_rejected_while_running(self):
         executed = threading.Event()

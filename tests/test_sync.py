@@ -225,6 +225,27 @@ class SyncEngineTest(unittest.TestCase):
             self.line_names(), ["Reunião de preparação [jira-worklog:27279]"]
         )
 
+    def test_result_items_describe_each_import(self):
+        result = self.engine.run(SINCE)
+        self.assertEqual(len(result.items), 1)
+        item = result.items[0]
+        self.assertEqual(item["acao"], "criado")
+        self.assertEqual(item["issue"], "CDV-331")
+        self.assertEqual(item["data"], "2026-06-08")
+        self.assertEqual(item["horas"], 0.33)
+        self.assertEqual(item["autor"], "Diego Gozer")
+
+        self.jira.worklogs["27279"]["timeSpentSeconds"] = 3600
+        result = SyncEngine(self.jira, self.odoo, make_config()).run(SINCE)
+        self.assertEqual(result.items[0]["acao"], "atualizado")
+        self.assertIn("unit_amount", result.items[0]["campos"])
+
+        self.jira.worklogs = {}
+        self.jira.deleted = [27279]
+        result = SyncEngine(self.jira, self.odoo, make_config()).run(SINCE, delete=True)
+        self.assertEqual(result.items[0]["acao"], "removido")
+        self.assertEqual(result.items[0]["worklog"], 27279)
+
     def test_deleted_worklog_removed_only_with_delete_flag(self):
         self.engine.run(SINCE)
         self.jira.worklogs = {}
