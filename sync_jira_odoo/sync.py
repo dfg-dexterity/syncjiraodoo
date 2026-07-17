@@ -20,7 +20,7 @@ from datetime import datetime
 
 from .config import Config
 from .jira_client import JiraClient, adf_to_text
-from .odoo_client import OdooClient
+from .odoo_client import OdooClient, OdooError
 
 log = logging.getLogger("sync_jira_odoo")
 
@@ -64,6 +64,8 @@ class SyncResult:
     skipped: int = 0
     deleted: int = 0
     warnings: list[str] = field(default_factory=list)
+    # um registro por timesheet criado/atualizado/removido, para auditoria
+    items: list[dict] = field(default_factory=list)
 
     def warn(self, message: str) -> None:
         self.warnings.append(message)
@@ -92,8 +94,19 @@ class SyncEngine:
 
         ids = self.jira.updated_worklog_ids(since_ms)
         log.info("worklogs alterados desde %s: %d", since.isoformat(), len(ids))
+        consecutive_errors = 0
         for worklog in self.jira.get_worklogs(ids):
-            self._sync_worklog(worklog, result, dry_run)
+            try:
+                self._sync_worklog(worklog, result, dry_run)
+                consecutive_errors = 0
+            except OdooError as exc:
+                # um worklog problemático não pode derrubar a carga inteira;
+                # só aborta se o Odoo falhar repetidamente (problema sistêmico)
+                consecutive_errors += 1
+                result.warn(f"worklog {worklog.get('id')} pulado por erro do Odoo: {exc}")
+                result.skipped += 1
+                if consecutive_errors >= 20:
+                    raise
 
         deleted_ids = self.jira.deleted_worklog_ids(since_ms)
         if deleted_ids:
@@ -159,11 +172,20 @@ class SyncEngine:
             result.skipped += 1
             return
 
+        autor = worklog["author"].get("displayName", "")
         if not existing:
             log.info("criando timesheet: %s %s (%sh)", issue_key, vals["date"], vals["unit_amount"])
             if not dry_run:
                 self.odoo.create("account.analytic.line", vals)
             result.created += 1
+            result.items.append({
+                "acao": "criado",
+                "issue": issue_key,
+                "data": vals["date"],
+                "horas": vals["unit_amount"],
+                "autor": autor,
+                "descricao": description[:120],
+            })
             return
 
         line = existing[0]
@@ -177,6 +199,15 @@ class SyncEngine:
             if not dry_run:
                 self.odoo.write("account.analytic.line", [line["id"]], changed)
             result.updated += 1
+            result.items.append({
+                "acao": "atualizado",
+                "issue": issue_key,
+                "data": vals["date"],
+                "horas": vals["unit_amount"],
+                "autor": autor,
+                "descricao": description[:120],
+                "campos": sorted(changed),
+            })
         else:
             result.skipped += 1
 
@@ -194,8 +225,23 @@ class SyncEngine:
             if not dry_run:
                 self.odoo.unlink("account.analytic.line", ids)
             result.deleted += len(ids)
+            for line in lines:
+                result.items.append({
+                    "acao": "removido",
+                    "worklog": w_id,
+                    "descricao": str(line.get("name", ""))[:120],
+                })
 
     # ------------------------------------------------------ projeto / tarefa
+
+    def _search_active_first(self, model: str, domain: list, fields: list[str]) -> list[dict]:
+        """Busca registros ativos e, se nada for encontrado, inclui os
+        arquivados — o histórico de projetos/funcionários arquivados no Odoo
+        continua válido para receber timesheets."""
+        rows = self.odoo.search_read(model, domain, fields, limit=1)
+        if not rows:
+            rows = self.odoo.search_read(model, domain, fields, limit=1, include_archived=True)
+        return rows
 
     def _ensure_project(
         self, key: str, jira_name: str, result: SyncResult, dry_run: bool
@@ -205,19 +251,19 @@ class SyncEngine:
 
         mapped_name = self.cfg.project_map.get(key)
         if mapped_name:
-            rows = self.odoo.search_read(
-                "project.project", [("name", "=", mapped_name)], ["name"], limit=1
+            rows = self._search_active_first(
+                "project.project", [("name", "=", mapped_name)], ["name"]
             )
             project_id = rows[0]["id"] if rows else None
             if project_id is None:
                 result.warn(
                     f"projeto Jira {key} mapeado para '{mapped_name}', mas esse "
-                    "projeto não existe no Odoo; worklogs serão pulados"
+                    "projeto não existe no Odoo (nem arquivado); worklogs serão pulados"
                 )
         else:
             marker = f"[{key}]"
-            rows = self.odoo.search_read(
-                "project.project", [("name", "like", marker)], ["name"], limit=1
+            rows = self._search_active_first(
+                "project.project", [("name", "like", marker)], ["name"]
             )
             if rows:
                 project_id = rows[0]["id"]
@@ -239,11 +285,10 @@ class SyncEngine:
             return self._task_cache[issue_key]
 
         marker = f"[{issue_key}]"
-        rows = self.odoo.search_read(
+        rows = self._search_active_first(
             "project.task",
             [("project_id", "=", project_id), ("name", "like", marker)],
             ["name"],
-            limit=1,
         )
         if rows:
             task_id = rows[0]["id"]
@@ -273,32 +318,45 @@ class SyncEngine:
             or jira_email
         )
 
-        employee_id = self._find_employee(email) if email else None
-        if employee_id is None and self.cfg.default_employee_email:
-            employee_id = self._find_employee(self.cfg.default_employee_email)
-        if employee_id is None:
+        employee = self._find_employee(email) if email else None
+        if employee is None and self.cfg.default_employee_email:
+            employee = self._find_employee(self.cfg.default_employee_email)
+
+        if employee is None:
+            employee_id = None
             result.warn(
                 f"autor Jira sem funcionário correspondente no Odoo: "
                 f"{author.get('displayName', '?')} (accountId={account_id}, "
                 f"email={jira_email or 'oculto'}); mapeie em JIRA_ODOO_EMPLOYEE_MAP"
             )
+        elif not employee.get("active", True):
+            # o Odoo proíbe criar timesheet para funcionário arquivado
+            employee_id = None
+            result.warn(
+                f"funcionário '{employee['name']}' ({email}) está arquivado no Odoo "
+                "e o Odoo não permite criar timesheets para arquivados; para importar "
+                "o histórico, reative-o temporariamente, rode o sync e arquive de novo "
+                "— worklogs pulados por enquanto"
+            )
+        else:
+            employee_id = employee["id"]
 
         self._employee_cache[account_id] = employee_id
         return employee_id
 
-    def _find_employee(self, email: str) -> int | None:
-        rows = self.odoo.search_read(
-            "hr.employee", [("work_email", "=ilike", email)], ["name"], limit=1
+    def _find_employee(self, email: str) -> dict | None:
+        """Prefere funcionários ativos; um arquivado ainda é devolvido (com
+        active=False) para o chamador avisar com nome e sobrenome."""
+        rows = self._search_active_first(
+            "hr.employee", [("work_email", "=ilike", email)], ["name", "active"]
         )
         if rows:
-            return rows[0]["id"]
-        users = self.odoo.search_read(
-            "res.users", [("login", "=ilike", email)], ["name"], limit=1
-        )
+            return rows[0]
+        users = self._search_active_first("res.users", [("login", "=ilike", email)], ["name"])
         if users:
-            rows = self.odoo.search_read(
-                "hr.employee", [("user_id", "=", users[0]["id"])], ["name"], limit=1
+            rows = self._search_active_first(
+                "hr.employee", [("user_id", "=", users[0]["id"])], ["name", "active"]
             )
             if rows:
-                return rows[0]["id"]
+                return rows[0]
         return None

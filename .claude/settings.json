@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Atlassian__searchJiraIssuesUsingJql",
+      "mcp__Atlassian__getJiraIssue",
+      "mcp__Atlassian__getVisibleJiraProjects",
+      "mcp__Atlassian__getAccessibleAtlassianResources",
+      "mcp__github__pull_request_read",
+      "mcp__Vercel__list_teams"
+    ]
+  }
+}

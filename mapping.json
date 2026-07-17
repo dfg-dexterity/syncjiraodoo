@@ -3,7 +3,132 @@
   "projects": [
     {
       "odoo": "Alvorada - Melhorias NDF",
-      "jira": ["AMN"]
+      "jira": [
+        "AMN"
+      ]
+    },
+    {
+      "odoo": "AMS - Casa dos Ventos",
+      "jira": [
+        "CCDV"
+      ]
+    },
+    {
+      "odoo": "Dexterity Casa dos Ventos",
+      "jira": [
+        "CDV"
+      ]
+    },
+    {
+      "odoo": "Cast - Sumitomo",
+      "jira": [
+        "CS"
+      ]
+    },
+    {
+      "odoo": "Fiagril - Melhorias",
+      "jira": [
+        "FIAG",
+        "FDFR",
+        "FB"
+      ]
+    },
+    {
+      "odoo": "POP - Processos Dexterity",
+      "jira": [
+        "PPD"
+      ]
+    },
+    {
+      "odoo": "Rotinas e Procedimentos ADM",
+      "jira": [
+        "RDF"
+      ]
+    },
+    {
+      "odoo": "DXT - Tarefas Avulsas",
+      "jira": [
+        "TAD"
+      ]
+    },
+    {
+      "odoo": "Novo Projeto",
+      "jira": [
+        "ADM"
+      ]
+    },
+    {
+      "odoo": "AMS - Ebanx",
+      "jira": [
+        "AE",
+        "CEBX"
+      ]
+    },
+    {
+      "odoo": "BCI - ALCAST",
+      "jira": [
+        "AL"
+      ]
+    },
+    {
+      "odoo": "DXT - Best Practices",
+      "jira": [
+        "BPRACT"
+      ]
+    },
+    {
+      "odoo": "Copel - GreenField",
+      "jira": [
+        "COP"
+      ]
+    },
+    {
+      "odoo": "C.Vale Melhorias Demo",
+      "jira": [
+        "CV"
+      ]
+    },
+    {
+      "odoo": "Desenvolvimentos Dexterity",
+      "jira": [
+        "DD"
+      ]
+    },
+    {
+      "odoo": "Dexterity - Melhoria Centro de Custo Seguros",
+      "jira": [
+        "DMCDCS"
+      ]
+    },
+    {
+      "odoo": "Dexterity - NDF Ebanx",
+      "jira": [
+        "DNE"
+      ]
+    },
+    {
+      "odoo": "Dexterity University",
+      "jira": [
+        "DU"
+      ]
+    },
+    {
+      "odoo": "Convista - MRV",
+      "jira": [
+        "MRV"
+      ]
+    },
+    {
+      "odoo": "Cast Hi-Mix",
+      "jira": [
+        "PCHM"
+      ]
+    },
+    {
+      "odoo": "Pré-Venda",
+      "jira": [
+        "PV"
+      ]
     }
   ],
   "users": [
@@ -26,6 +151,21 @@
       "jira": "wilian@dexterityit.com.br",
       "odoo": "wilian@dexterityit.com.br",
       "nome": "Wilian Geanino Santos"
+    },
+    {
+      "jira": "henrique@dexterityit.com.br",
+      "odoo": "henrique@dexterityit.com.br",
+      "nome": "Henrique de Lara"
+    },
+    {
+      "jira": "ana@dexterityit.com.br",
+      "odoo": "ana@dexterityit.com.br",
+      "nome": "Ana Luiza de Souza"
+    },
+    {
+      "jira": "anajulia@dexterityit.com.br",
+      "odoo": "anajulia@dexterityit.com.br",
+      "nome": "Ana Júlia Marianno de Campos"
     }
   ]
 }

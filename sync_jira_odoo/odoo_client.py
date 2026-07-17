@@ -65,10 +65,13 @@ class OdooClient:
         domain: list,
         fields: list[str],
         limit: int | None = None,
+        include_archived: bool = False,
     ) -> list[dict]:
         kwargs: dict[str, Any] = {"fields": fields}
         if limit is not None:
             kwargs["limit"] = limit
+        if include_archived:
+            kwargs["context"] = {"active_test": False}
         return self.execute(model, "search_read", domain, **kwargs)
 
     def create(self, model: str, vals: dict) -> int:

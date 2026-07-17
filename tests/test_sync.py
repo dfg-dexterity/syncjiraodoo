@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from sync_jira_odoo.config import Config
 from sync_jira_odoo.jira_client import adf_to_text
+from sync_jira_odoo.odoo_client import OdooError
 from sync_jira_odoo.sync import SyncEngine
 
 from .fakes import FakeJira, FakeOdoo, make_issue, make_worklog
@@ -146,6 +147,67 @@ class SyncEngineTest(unittest.TestCase):
         self.assertEqual(len(result.warnings), 1)
         self.assertIn("ninguem@exemplo.com", result.warnings[0])
 
+    def test_archived_employee_warns_and_skips_without_aborting(self):
+        # o Odoo proíbe timesheet de funcionário arquivado: avisa (com o nome)
+        # e pula, em vez de deixar o servidor abortar a carga inteira
+        self.odoo.data["hr.employee"] = [
+            {
+                "id": 12,
+                "name": "Ana Luiza de Souza",
+                "work_email": "ana@dexterityit.com.br",
+                "user_id": False,
+                "active": False,
+            }
+        ]
+        self.jira.worklogs["27279"] = make_worklog(author_email="ana@dexterityit.com.br")
+        result = self.engine.run(SINCE)
+        self.assertEqual((result.created, result.skipped), (0, 1))
+        self.assertEqual(len(result.warnings), 1)
+        self.assertIn("Ana Luiza de Souza", result.warnings[0])
+        self.assertIn("arquivado", result.warnings[0])
+        self.assertNotIn("account.analytic.line", self.odoo.data)
+
+    def test_odoo_error_in_one_worklog_does_not_abort_run(self):
+        # simula a recusa do servidor (ex.: "funcionário ativo exigido") em um
+        # worklog: o run continua e o problema vira aviso + pulado
+        original_create = self.odoo.create
+
+        def flaky_create(model, vals):
+            if model == "account.analytic.line":
+                raise OdooError("Planilhas devem ser criadas com um funcionário ativo")
+            return original_create(model, vals)
+
+        self.odoo.create = flaky_create
+        result = self.engine.run(SINCE)
+        self.assertEqual((result.created, result.skipped), (0, 1))
+        self.assertEqual(len(result.warnings), 1)
+        self.assertIn("funcionário ativo", result.warnings[0])
+
+    def test_active_employee_preferred_over_archived_with_same_email(self):
+        self.odoo.data["hr.employee"] = [
+            {"id": 12, "name": "Antiga", "work_email": "diego@dexterityit.com.br",
+             "user_id": False, "active": False},
+            {"id": 13, "name": "Atual", "work_email": "diego@dexterityit.com.br",
+             "user_id": False, "active": True},
+        ]
+        result = self.engine.run(SINCE)
+        self.assertEqual(result.created, 1)
+        self.assertEqual(self.odoo.data["account.analytic.line"][0]["employee_id"], 13)
+
+    def test_project_map_finds_archived_project(self):
+        self.odoo.data["project.project"] = [
+            {"id": 55, "name": "Casa dos Ventos", "active": False}
+        ]
+        engine = SyncEngine(
+            self.jira, self.odoo, make_config(project_map={"CDV": "Casa dos Ventos"})
+        )
+        result = engine.run(SINCE)
+        self.assertEqual(result.created, 1)
+        self.assertEqual(result.warnings, [])
+        self.assertEqual(self.odoo.data["account.analytic.line"][0]["project_id"], 55)
+        # continua arquivado: histórico preservado sem reativar o projeto
+        self.assertFalse(self.odoo.data["project.project"][0]["active"])
+
     def test_employee_found_via_user_login(self):
         self.odoo.data["hr.employee"] = [
             {"id": 9, "name": "Julian", "work_email": False, "user_id": 31}
@@ -162,6 +224,27 @@ class SyncEngineTest(unittest.TestCase):
         self.assertEqual(
             self.line_names(), ["Reunião de preparação [jira-worklog:27279]"]
         )
+
+    def test_result_items_describe_each_import(self):
+        result = self.engine.run(SINCE)
+        self.assertEqual(len(result.items), 1)
+        item = result.items[0]
+        self.assertEqual(item["acao"], "criado")
+        self.assertEqual(item["issue"], "CDV-331")
+        self.assertEqual(item["data"], "2026-06-08")
+        self.assertEqual(item["horas"], 0.33)
+        self.assertEqual(item["autor"], "Diego Gozer")
+
+        self.jira.worklogs["27279"]["timeSpentSeconds"] = 3600
+        result = SyncEngine(self.jira, self.odoo, make_config()).run(SINCE)
+        self.assertEqual(result.items[0]["acao"], "atualizado")
+        self.assertIn("unit_amount", result.items[0]["campos"])
+
+        self.jira.worklogs = {}
+        self.jira.deleted = [27279]
+        result = SyncEngine(self.jira, self.odoo, make_config()).run(SINCE, delete=True)
+        self.assertEqual(result.items[0]["acao"], "removido")
+        self.assertEqual(result.items[0]["worklog"], 27279)
 
     def test_deleted_worklog_removed_only_with_delete_flag(self):
         self.engine.run(SINCE)
