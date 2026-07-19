@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -22,8 +23,13 @@ class WebTest(unittest.TestCase):
         storage.append_history(base / "history.json", {"ok": True, "created": 3})
 
         self.import_log_path = base / "import_log.jsonl"
+        self.env_path = base / ".env"
         self.runner = SyncRunner(
-            self.mapping_path, base / "state.json", base / "history.json", self.import_log_path
+            self.mapping_path,
+            base / "state.json",
+            base / "history.json",
+            self.import_log_path,
+            self.env_path,
         )
         self.server = App(("127.0.0.1", 0), self.runner)
         self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -48,7 +54,40 @@ class WebTest(unittest.TestCase):
     def test_index_serves_html(self):
         with urllib.request.urlopen(self.base_url + "/") as resp:
             self.assertEqual(resp.status, 200)
-            self.assertIn("De-para de projetos", resp.read().decode())
+            html = resp.read().decode()
+        self.assertIn("Sincronizador de Horas", html)
+        self.assertIn("De-para de projetos", html)
+        self.assertIn("Simular (não grava nada)", html)
+
+    def test_config_get_masks_secrets(self):
+        os.environ["ODOO_API_KEY"] = "segredo-que-nao-volta"
+        try:
+            status, data = self._request("/api/config")
+        finally:
+            os.environ.pop("ODOO_API_KEY", None)
+        self.assertEqual(status, 200)
+        field = data["fields"]["ODOO_API_KEY"]
+        self.assertTrue(field["set"])
+        self.assertEqual(field["value"], "")
+
+    def test_config_post_saves_env_file_and_environ(self):
+        body = {"ODOO_URL": "https://exemplo.odoo.com", "ODOO_DB": "exemplo"}
+        try:
+            status, data = self._request("/api/config", body)
+            self.assertEqual(status, 200)
+            self.assertTrue(data["ok"])
+            self.assertEqual(os.environ["ODOO_URL"], "https://exemplo.odoo.com")
+            text = self.env_path.read_text(encoding="utf-8")
+            self.assertIn("ODOO_URL=https://exemplo.odoo.com", text)
+            self.assertIn("ODOO_DB=exemplo", text)
+        finally:
+            os.environ.pop("ODOO_URL", None)
+            os.environ.pop("ODOO_DB", None)
+
+    def test_config_post_empty_is_rejected(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/config", {})
+        self.assertEqual(ctx.exception.code, 400)
 
     def test_state_returns_mapping_and_history(self):
         status, state = self._request("/api/state")
@@ -101,7 +140,7 @@ class WebTest(unittest.TestCase):
 
     def test_index_has_import_log_section(self):
         with urllib.request.urlopen(self.base_url + "/") as resp:
-            self.assertIn("Importados no Odoo", resp.read().decode())
+            self.assertIn("Apontamentos importados no Odoo", resp.read().decode())
 
     def test_sync_rejected_while_running(self):
         executed = threading.Event()

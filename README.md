@@ -4,6 +4,21 @@ Sincroniza apontamentos de horas do **Jira/Clockwork Pro** para timesheets do
 **Odoo Online**, usando apenas a biblioteca padrão do Python (`xmlrpc.client`
 para o Odoo, `urllib` para o Jira). Sem dependências externas.
 
+## Início rápido (sem terminal)
+
+1. **Abra o aplicativo:** dê **duplo clique em `Iniciar Sincronizador.command`**
+   (macOS) — ou rode `python3 -m sync_jira_odoo.web`. O navegador abre sozinho.
+2. **Configure as conexões na própria tela** (seção "Conexões"): endereço e
+   credenciais do Jira e do Odoo, com botão *Testar conexões*. Fica salvo no
+   `.env` local (fora do git) e carregado automaticamente nas próximas vezes —
+   ninguém precisa exportar variáveis.
+3. **Clique em "Simular (não grava nada)"** para conferir o que entraria e,
+   estando tudo certo, **"▶ Sincronizar agora"**.
+
+A mesma tela edita o de-para de projetos/pessoas e mostra a atividade:
+resumo de cada execução, cada apontamento importado no Odoo (com filtro) e o
+log técnico.
+
 > O Clockwork Pro grava os apontamentos como **worklogs nativos do Jira**;
 > por isso o sync lê a API nativa de worklogs (`/rest/api/3/worklog/*`) e
 > cobre tudo que é registrado pelo Clockwork — timers, ajustes manuais e

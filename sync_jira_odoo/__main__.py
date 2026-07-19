@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import storage
 from .config import Config, ConfigError
+from .envfile import DEFAULT_ENV_FILE, load_env_file
 from .jira_client import JiraClient, JiraError
 from .logsetup import DEFAULT_RUN_LOG_FILE, configure_logging
 from .mapping import Mapping
@@ -79,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="log completo da execução, rotativo (padrão: "
         f"{DEFAULT_RUN_LOG_FILE}; use '' para desativar)",
     )
+    parser.add_argument(
+        "--env-file",
+        default=DEFAULT_ENV_FILE,
+        help=f"arquivo de credenciais carregado automaticamente (padrão: {DEFAULT_ENV_FILE})",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="log detalhado")
     return parser
 
@@ -86,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(verbose=args.verbose, log_file=args.log_file or None)
+    load_env_file(args.env_file)
 
     try:
         cfg = Config.from_env()
