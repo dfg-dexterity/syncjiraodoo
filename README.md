@@ -122,6 +122,38 @@ Agendamento via cron (a cada 30 min):
 */30 * * * * cd /opt/syncjiraodoo && set -a && . ./.env && set +a && python3 -m sync_jira_odoo >> sync.log 2>&1
 ```
 
+## Administração compartilhada
+
+Para outra pessoa administrar a integração, ela precisa de três coisas:
+
+1. **Acesso ao código** — no GitHub: *Settings → Collaborators and teams →
+   Add people*, papel **Write** (edita `mapping.json`, abre PRs) ou **Admin**
+   (gerencia o repositório).
+2. **Credenciais próprias** — nunca compartilhe chaves pessoais:
+   - **Odoo:** o ideal é um usuário de serviço (ex.: `integracao@…`) com
+     acesso a Projetos, Planilhas de Horas e Funcionários; a pessoa gera a
+     chave em *Preferências → Segurança da Conta → Chaves de API*.
+   - **Jira:** cada administrador cria seu token em
+     <https://id.atlassian.com/manage-profile/security/api-tokens>; a conta
+     precisa enxergar todos os projetos mapeados (os worklogs visíveis
+     seguem a permissão do token).
+   - As credenciais ficam no `.env` da máquina que executa (fora do git).
+3. **Acesso à máquina que executa** — para operação realmente compartilhada,
+   rode em uma máquina fixa (servidor interno) com cron, em vez do laptop de
+   alguém. A interface web (`python3 -m sync_jira_odoo.web`) não tem
+   autenticação: mantenha em `127.0.0.1` ou rede interna confiável.
+
+## Arquivos de estado e logs
+
+Todos ficam no diretório de execução, fora do versionamento:
+
+| Arquivo | Conteúdo |
+|---|---|
+| `.sync_state.json` | ponto de avanço incremental (última execução ok) |
+| `.sync_history.json` | resumo das últimas 200 execuções (contadores + avisos) — alimenta o Monitor da interface web |
+| `.sync_import_log.jsonl` | um registro por timesheet criado/atualizado/removido no Odoo (últimos 5 000) — seção "Importados no Odoo" da interface web; dry-run não grava |
+| `.sync_run.log` (+ `.1`…`.3`) | log completo de execução (cada linha do que o sync fez), rotativo em 2 MB × 3 — `--log-file` muda o caminho, `--log-file ''` desativa |
+
 ## Decisões de mapeamento
 
 - **Autor → funcionário:** resolução por `JIRA_ODOO_EMPLOYEE_MAP[accountId]` →

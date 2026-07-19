@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlparse
 from . import storage
 from .config import Config, ConfigError
 from .jira_client import JiraClient
+from .logsetup import DEFAULT_RUN_LOG_FILE, configure_logging
 from .mapping import Mapping
 from .odoo_client import OdooClient
 from .sync import SyncEngine, connection_report
@@ -516,9 +517,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state-file", default=storage.DEFAULT_STATE_FILE)
     parser.add_argument("--history-file", default=storage.DEFAULT_HISTORY_FILE)
     parser.add_argument("--import-log-file", default=storage.DEFAULT_IMPORT_LOG_FILE)
+    parser.add_argument("--log-file", default=DEFAULT_RUN_LOG_FILE)
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging(log_file=args.log_file or None)
     runner = SyncRunner(
         Path(args.mapping_file),
         Path(args.state_file),

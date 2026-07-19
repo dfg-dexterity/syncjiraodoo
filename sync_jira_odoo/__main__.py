@@ -12,6 +12,7 @@ from pathlib import Path
 from . import storage
 from .config import Config, ConfigError
 from .jira_client import JiraClient, JiraError
+from .logsetup import DEFAULT_RUN_LOG_FILE, configure_logging
 from .mapping import Mapping
 from .odoo_client import OdooClient, OdooError
 from .sync import SyncEngine, connection_report
@@ -72,17 +73,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="log persistente dos timesheets importados no Odoo "
         f"(padrão: {storage.DEFAULT_IMPORT_LOG_FILE}; dry-run não grava)",
     )
+    parser.add_argument(
+        "--log-file",
+        default=DEFAULT_RUN_LOG_FILE,
+        help="log completo da execução, rotativo (padrão: "
+        f"{DEFAULT_RUN_LOG_FILE}; use '' para desativar)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="log detalhado")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        stream=sys.stderr,
-    )
+    configure_logging(verbose=args.verbose, log_file=args.log_file or None)
 
     try:
         cfg = Config.from_env()
