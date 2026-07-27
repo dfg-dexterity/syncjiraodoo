@@ -28,7 +28,7 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      - APP_DOMAIN=${APP_DOMAIN:?defina APP_DOMAIN (ex.: horas.suaempresa.com.br)}
+      - "APP_DOMAIN=${APP_DOMAIN:?defina APP_DOMAIN no arquivo .env.compose}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
