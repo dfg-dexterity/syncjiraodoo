@@ -55,6 +55,7 @@ class WebTest(unittest.TestCase):
         )
         with urllib.request.urlopen(req) as resp:
             set_cookie = resp.getheader("Set-Cookie") or ""
+        self.cookie_header = set_cookie
         return set_cookie.split(";")[0]
 
     def _request(self, path, body=None, cookie="use-session"):
@@ -102,6 +103,20 @@ class WebTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self._request("/api/setup", {"email": "x@y.com", "senha": "12345678"}, cookie=None)
         self.assertEqual(ctx.exception.code, 403)
+
+    def test_session_cookie_secure_behind_https_proxy(self):
+        req = urllib.request.Request(
+            self.base_url + "/api/login",
+            data=json.dumps({"email": ADMIN, "senha": SENHA}).encode(),
+            headers={"Content-Type": "application/json", "X-Forwarded-Proto": "https"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            set_cookie = resp.getheader("Set-Cookie") or ""
+        self.assertIn("Secure", set_cookie)
+        self.assertIn("HttpOnly", set_cookie)
+        # sem o proxy HTTPS, o flag Secure não entra (senão o cookie some em HTTP local)
+        self.assertNotIn("Secure", self.cookie_header or "")
 
     def test_non_admin_cannot_manage_users(self):
         status, data = self._request(

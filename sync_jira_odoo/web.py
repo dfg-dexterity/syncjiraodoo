@@ -270,6 +270,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _set_session_cookie(self, token: str, expire: bool = False) -> None:
         attrs = f"{auth.SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax"
+        if self.headers.get("X-Forwarded-Proto", "").lower() == "https":
+            # atrás de um proxy HTTPS (Caddy etc.), o cookie nunca viaja em claro
+            attrs += "; Secure"
         if expire:
             attrs += "; Max-Age=0"
         self.send_header("Set-Cookie", attrs)

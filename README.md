@@ -31,11 +31,45 @@ log técnico.
   O último administrador não pode ser removido.
 - **Recuperação pelo terminal:** `python3 -m sync_jira_odoo.web --add-user
   email@empresa.com.br` cadastra (ou redefine a senha de) um administrador.
-- **Para o time acessar:** rode o app numa máquina fixa da rede interna com
-  `--host 0.0.0.0` e compartilhe `http://ip-da-maquina:8765`. O app fala
-  HTTP puro — em rede interna ok; para acesso pela internet, coloque um
-  proxy HTTPS na frente (ex.: [Caddy](https://caddyserver.com), 2 linhas de
-  configuração), senão a senha viaja sem criptografia.
+- **Para o time acessar na rede interna:** rode o app numa máquina fixa com
+  `--host 0.0.0.0` e compartilhe `http://ip-da-maquina:8765`.
+- **Para acessar pela internet:** use o kit pronto da seção seguinte —
+  nunca exponha a porta 8765 diretamente (HTTP puro, senha em claro).
+
+## Publicar na internet (HTTPS automático)
+
+O repositório traz um kit Docker pronto (`Dockerfile`, `docker-compose.yml`,
+`Caddyfile`): o Caddy emite e renova o certificado HTTPS sozinho e repassa o
+tráfego ao aplicativo; com HTTPS na frente, o cookie de sessão sai com o
+flag `Secure`. Como Jira e Odoo são serviços na nuvem, o app pode morar em
+qualquer servidor.
+
+**Passo a passo (VPS de ~US$ 5/mês — Hetzner, DigitalOcean, Lightsail…):**
+
+1. Crie um servidor Ubuntu com Docker instalado
+   (`curl -fsSL https://get.docker.com | sh`).
+2. No seu DNS, aponte um subdomínio para o IP do servidor
+   (ex.: `horas.suaempresa.com.br → A → IP`).
+3. No servidor:
+   ```bash
+   git clone https://github.com/dfg-dexterity/syncjiraodoo.git
+   cd syncjiraodoo
+   echo "APP_DOMAIN=horas.suaempresa.com.br" > .env.compose
+   docker compose --env-file .env.compose up -d --build
+   ```
+4. Abra `https://horas.suaempresa.com.br`, crie o usuário administrador e
+   configure as conexões pela tela. Tudo que persiste (credenciais,
+   usuários, de-para, estado e logs) fica no volume `sjo_data`.
+
+**Alternativa sem servidor (túnel):** rodando o app numa máquina do
+escritório que fique sempre ligada, um
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+publica `http://localhost:8765` num domínio seu com HTTPS, sem abrir porta
+no roteador. Bom para começar; o VPS é a opção mais estável.
+
+Recomendações para exposição pública: senhas longas para todos os usuários,
+mantenha o servidor atualizado e acompanhe a seção Atividade — todo acesso
+ao app exige login e toda importação fica registrada.
 
 > O Clockwork Pro grava os apontamentos como **worklogs nativos do Jira**;
 > por isso o sync lê a API nativa de worklogs (`/rest/api/3/worklog/*`) e
