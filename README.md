@@ -8,16 +8,34 @@ para o Odoo, `urllib` para o Jira). Sem dependências externas.
 
 1. **Abra o aplicativo:** dê **duplo clique em `Iniciar Sincronizador.command`**
    (macOS) — ou rode `python3 -m sync_jira_odoo.web`. O navegador abre sozinho.
-2. **Configure as conexões na própria tela** (seção "Conexões"): endereço e
+2. **Crie o primeiro acesso:** na primeira abertura, o app pede um e-mail e
+   senha para o **usuário administrador**. Depois, todo acesso exige login.
+3. **Configure as conexões na própria tela** (seção "Conexões"): endereço e
    credenciais do Jira e do Odoo, com botão *Testar conexões*. Fica salvo no
    `.env` local (fora do git) e carregado automaticamente nas próximas vezes —
    ninguém precisa exportar variáveis.
-3. **Clique em "Simular (não grava nada)"** para conferir o que entraria e,
+4. **Clique em "Simular (não grava nada)"** para conferir o que entraria e,
    estando tudo certo, **"▶ Sincronizar agora"**.
 
 A mesma tela edita o de-para de projetos/pessoas e mostra a atividade:
 resumo de cada execução, cada apontamento importado no Odoo (com filtro) e o
 log técnico.
+
+## Acesso da equipe (usuário e senha)
+
+- **Todo acesso exige login.** Senhas ficam com hash `scrypt` + salt em
+  `.users.json` (permissão 0600, fora do git); sessões expiram em 12 h e
+  caem quando o app reinicia.
+- **Administradores** veem a seção **Equipe** no app: adicionam pessoas
+  (e-mail + senha inicial, opcionalmente administrador) e removem acessos.
+  O último administrador não pode ser removido.
+- **Recuperação pelo terminal:** `python3 -m sync_jira_odoo.web --add-user
+  email@empresa.com.br` cadastra (ou redefine a senha de) um administrador.
+- **Para o time acessar:** rode o app numa máquina fixa da rede interna com
+  `--host 0.0.0.0` e compartilhe `http://ip-da-maquina:8765`. O app fala
+  HTTP puro — em rede interna ok; para acesso pela internet, coloque um
+  proxy HTTPS na frente (ex.: [Caddy](https://caddyserver.com), 2 linhas de
+  configuração), senão a senha viaja sem criptografia.
 
 > O Clockwork Pro grava os apontamentos como **worklogs nativos do Jira**;
 > por isso o sync lê a API nativa de worklogs (`/rest/api/3/worklog/*`) e
@@ -168,6 +186,7 @@ Todos ficam no diretório de execução, fora do versionamento:
 | `.sync_history.json` | resumo das últimas 200 execuções (contadores + avisos) — alimenta o Monitor da interface web |
 | `.sync_import_log.jsonl` | um registro por timesheet criado/atualizado/removido no Odoo (últimos 5 000) — seção "Importados no Odoo" da interface web; dry-run não grava |
 | `.sync_run.log` (+ `.1`…`.3`) | log completo de execução (cada linha do que o sync fez), rotativo em 2 MB × 3 — `--log-file` muda o caminho, `--log-file ''` desativa |
+| `.users.json` | usuários do aplicativo (hash de senha `scrypt` + salt; nunca a senha) |
 
 ## Decisões de mapeamento
 

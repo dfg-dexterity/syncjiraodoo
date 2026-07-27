@@ -9,9 +9,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from sync_jira_odoo import storage
+from sync_jira_odoo import auth, storage
 from sync_jira_odoo.mapping import Mapping
 from sync_jira_odoo.web import App, SyncRunner
+
+ADMIN = "admin@exemplo.com.br"
+SENHA = "senha-forte-123"
 
 
 class WebTest(unittest.TestCase):
@@ -24,6 +27,8 @@ class WebTest(unittest.TestCase):
 
         self.import_log_path = base / "import_log.jsonl"
         self.env_path = base / ".env"
+        self.users_path = base / "users.json"
+        auth.add_user(self.users_path, ADMIN, SENHA, admin=True)
         self.runner = SyncRunner(
             self.mapping_path,
             base / "state.json",
@@ -31,33 +36,85 @@ class WebTest(unittest.TestCase):
             self.import_log_path,
             self.env_path,
         )
-        self.server = App(("127.0.0.1", 0), self.runner)
+        self.server = App(("127.0.0.1", 0), self.runner, self.users_path)
         self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.cookie = self._login(ADMIN, SENHA)
 
     def tearDown(self):
         self.server.shutdown()
         self.server.server_close()
         self.tmp.cleanup()
 
-    def _request(self, path, body=None):
+    def _login(self, email, senha):
+        req = urllib.request.Request(
+            self.base_url + "/api/login",
+            data=json.dumps({"email": email, "senha": senha}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as resp:
+            set_cookie = resp.getheader("Set-Cookie") or ""
+        return set_cookie.split(";")[0]
+
+    def _request(self, path, body=None, cookie="use-session"):
         data = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json"}
+        if cookie == "use-session":
+            headers["Cookie"] = self.cookie
+        elif cookie:
+            headers["Cookie"] = cookie
         req = urllib.request.Request(
             self.base_url + path,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST" if data is not None else "GET",
         )
         with urllib.request.urlopen(req) as resp:
             return resp.status, json.loads(resp.read() or b"{}")
 
-    def test_index_serves_html(self):
-        with urllib.request.urlopen(self.base_url + "/") as resp:
+    def test_index_serves_app_when_logged_in(self):
+        req = urllib.request.Request(self.base_url + "/", headers={"Cookie": self.cookie})
+        with urllib.request.urlopen(req) as resp:
             self.assertEqual(resp.status, 200)
             html = resp.read().decode()
         self.assertIn("Sincronizador de Horas", html)
         self.assertIn("De-para de projetos", html)
         self.assertIn("Simular (não grava nada)", html)
+
+    def test_index_serves_login_when_anonymous(self):
+        with urllib.request.urlopen(self.base_url + "/") as resp:
+            html = resp.read().decode()
+        self.assertIn("Entrar", html)
+        self.assertNotIn("De-para de projetos", html)
+
+    def test_api_requires_login(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/state", cookie=None)
+        self.assertEqual(ctx.exception.code, 401)
+
+    def test_wrong_password_rejected(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._login(ADMIN, "senha-errada-999")
+        self.assertEqual(ctx.exception.code, 401)
+
+    def test_setup_blocked_when_users_exist(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/setup", {"email": "x@y.com", "senha": "12345678"}, cookie=None)
+        self.assertEqual(ctx.exception.code, 403)
+
+    def test_non_admin_cannot_manage_users(self):
+        status, data = self._request(
+            "/api/users", {"email": "membro@exemplo.com.br", "senha": "senha-forte-123"}
+        )
+        self.assertTrue(data["ok"])
+        member_cookie = self._login("membro@exemplo.com.br", "senha-forte-123")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/users", cookie=member_cookie)
+        self.assertEqual(ctx.exception.code, 403)
+        status, data = self._request("/api/users", cookie="use-session")
+        emails = [u["email"] for u in data["users"]]
+        self.assertIn("membro@exemplo.com.br", emails)
 
     def test_config_get_masks_secrets(self):
         os.environ["ODOO_API_KEY"] = "segredo-que-nao-volta"
@@ -139,7 +196,8 @@ class WebTest(unittest.TestCase):
         self.assertEqual(data["items"], [])
 
     def test_index_has_import_log_section(self):
-        with urllib.request.urlopen(self.base_url + "/") as resp:
+        req = urllib.request.Request(self.base_url + "/", headers={"Cookie": self.cookie})
+        with urllib.request.urlopen(req) as resp:
             self.assertIn("Apontamentos importados no Odoo", resp.read().decode())
 
     def test_sync_rejected_while_running(self):

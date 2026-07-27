@@ -21,9 +21,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import time
 import webbrowser
+from http.cookies import SimpleCookie
 
-from . import storage
+from . import auth, storage
 from .config import Config, ConfigError
 from .envfile import DEFAULT_ENV_FILE, load_env_file, save_env_file
 from .jira_client import JiraClient
@@ -143,9 +145,16 @@ def _is_configured() -> bool:
 
 
 class App(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], runner: SyncRunner):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        runner: SyncRunner,
+        users_path: Path | None = None,
+    ):
         super().__init__(address, Handler)
         self.runner = runner
+        self.users_path = users_path or Path(auth.DEFAULT_USERS_FILE)
+        self.sessions = auth.SessionStore()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -166,15 +175,62 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return json.loads(self.rfile.read(length) or b"{}")
 
+    # -------------------------------------------------------------- sessão
+
+    def _session_token(self) -> str | None:
+        cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        morsel = cookie.get(auth.SESSION_COOKIE)
+        return morsel.value if morsel else None
+
+    def _current_user(self) -> dict | None:
+        email = self.server.sessions.get(self._session_token())
+        if not email:
+            return None
+        record = auth.load_users(self.server.users_path).get(email)
+        if record is None:
+            return None
+        return {"email": email, "admin": bool(record.get("admin"))}
+
+    def _send_html(self, html: str) -> None:
+        body = html.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
         runner = self.server.runner
+        user = self._current_user()
         if self.path == "/":
-            body = INDEX_HTML.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_html(INDEX_HTML if user else LOGIN_HTML)
+            return
+        if self.path == "/api/auth-state":
+            self._send_json(
+                {
+                    "needs_setup": not auth.load_users(self.server.users_path),
+                    "logged_in": user is not None,
+                    "email": user["email"] if user else "",
+                    "admin": bool(user and user["admin"]),
+                }
+            )
+            return
+        if user is None:
+            self._send_json({"error": "faça login para continuar"}, status=401)
+            return
+        if self.path == "/api/users":
+            if not user["admin"]:
+                self._send_json({"error": "somente administradores"}, status=403)
+                return
+            users = auth.load_users(self.server.users_path)
+            self._send_json(
+                {
+                    "users": [
+                        {"email": email, "admin": bool(record.get("admin"))}
+                        for email, record in sorted(users.items())
+                    ]
+                }
+            )
         elif self.path == "/api/config":
             fields = {}
             for key in CONFIG_KEYS:
@@ -199,6 +255,7 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "running": runner.running,
                     "configured": _is_configured(),
+                    "user": user,
                     "mapping": {
                         "restrict_to_mapped_projects": mapping.restrict_to_mapped_projects,
                         "projects": mapping.projects,
@@ -211,8 +268,86 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send_json({"error": "não encontrado"}, status=404)
 
+    def _set_session_cookie(self, token: str, expire: bool = False) -> None:
+        attrs = f"{auth.SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax"
+        if expire:
+            attrs += "; Max-Age=0"
+        self.send_header("Set-Cookie", attrs)
+
+    def _login_ok(self, email: str, admin: bool) -> None:
+        token = self.server.sessions.create(email)
+        body = json.dumps({"ok": True, "admin": admin}, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self._set_session_cookie(token)
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self) -> None:
         runner = self.server.runner
+        if self.path == "/api/login":
+            data = self._read_json()
+            email = str(data.get("email", "")).strip().lower()
+            record = auth.verify_user(self.server.users_path, email, str(data.get("senha", "")))
+            if record is None:
+                time.sleep(0.4)  # desestimula tentativa e erro
+                self._send_json({"ok": False, "error": "e-mail ou senha incorretos"}, 401)
+                return
+            self._login_ok(email, bool(record.get("admin")))
+            return
+        if self.path == "/api/setup":
+            if auth.load_users(self.server.users_path):
+                self._send_json({"ok": False, "error": "o aplicativo já tem usuários"}, 403)
+                return
+            data = self._read_json()
+            try:
+                auth.add_user(
+                    self.server.users_path,
+                    str(data.get("email", "")),
+                    str(data.get("senha", "")),
+                    admin=True,
+                )
+            except ValueError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
+                return
+            self._login_ok(str(data.get("email", "")).strip().lower(), True)
+            return
+
+        user = self._current_user()
+        if user is None:
+            self._send_json({"error": "faça login para continuar"}, status=401)
+            return
+        if self.path == "/api/logout":
+            self.server.sessions.drop(self._session_token())
+            body = json.dumps({"ok": True}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self._set_session_cookie("saiu", expire=True)
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path in ("/api/users", "/api/users/delete"):
+            if not user["admin"]:
+                self._send_json({"error": "somente administradores"}, status=403)
+                return
+            data = self._read_json()
+            try:
+                if self.path == "/api/users":
+                    auth.add_user(
+                        self.server.users_path,
+                        str(data.get("email", "")),
+                        str(data.get("senha", "")),
+                        admin=bool(data.get("admin")),
+                    )
+                else:
+                    auth.remove_user(self.server.users_path, str(data.get("email", "")))
+            except ValueError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
+                return
+            self._send_json({"ok": True})
+            return
         if self.path == "/api/config":
             data = self._read_json()
             values = {
@@ -259,6 +394,94 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send_json({"error": "não encontrado"}, status=404)
 
+
+LOGIN_HTML = r"""<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Entrar — Sincronizador de Horas</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: #f6f7f9; color: #1b2029;
+    font: 15px/1.5 ui-sans-serif, system-ui, "Segoe UI", Roboto, Arial, sans-serif;
+  }
+  .box {
+    width: min(400px, 92vw); background: #fff; border: 1px solid #dfe3ea;
+    border-radius: 16px; padding: 2rem;
+    box-shadow: 0 1px 2px rgba(27,32,41,.06), 0 8px 28px rgba(27,32,41,.08);
+  }
+  .logo { font-size: 2rem; text-align: center; }
+  h1 { font-size: 1.1rem; text-align: center; margin: .4rem 0 .2rem; }
+  p.sub { font-size: .82rem; color: #5d6674; text-align: center; margin: 0 0 1.2rem; }
+  label { display: block; font-size: .78rem; font-weight: 600; color: #5d6674; margin: .8rem 0 .2rem; }
+  input {
+    width: 100%; font: inherit; padding: .55rem .7rem;
+    border: 1px solid #c3c9d4; border-radius: 9px;
+  }
+  input:focus-visible { outline: 2px solid #1257b8; outline-offset: 1px; }
+  button {
+    width: 100%; margin-top: 1.2rem; font: inherit; font-weight: 700; cursor: pointer;
+    padding: .7rem; border-radius: 10px; border: none; background: #1b2029; color: #fff;
+  }
+  button:hover { opacity: .9; }
+  #err { color: #ab3226; font-size: .84rem; margin-top: .8rem; text-align: center; min-height: 1.2em; }
+  #confirmWrap { display: none; }
+</style>
+</head>
+<body>
+<form class="box" id="form">
+  <div class="logo">⏱</div>
+  <h1 id="title">Entrar</h1>
+  <p class="sub" id="subtitle">Sincronizador de Horas — Jira → Odoo</p>
+  <label>E-mail</label>
+  <input id="email" type="email" autocomplete="username" required autofocus>
+  <label>Senha</label>
+  <input id="senha" type="password" autocomplete="current-password" required minlength="8">
+  <div id="confirmWrap">
+    <label>Confirme a senha</label>
+    <input id="confirma" type="password" autocomplete="new-password" minlength="8">
+  </div>
+  <button type="submit" id="btn">Entrar</button>
+  <div id="err"></div>
+</form>
+<script>
+"use strict";
+let needsSetup = false;
+fetch("/api/auth-state").then(r => r.json()).then(data => {
+  needsSetup = !!data.needs_setup;
+  if (needsSetup) {
+    document.getElementById("title").textContent = "Bem-vindo! Crie o primeiro acesso";
+    document.getElementById("subtitle").textContent =
+      "Este será o usuário administrador do Sincronizador de Horas.";
+    document.getElementById("confirmWrap").style.display = "";
+    document.getElementById("btn").textContent = "Criar e entrar";
+  }
+});
+document.getElementById("form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const err = document.getElementById("err");
+  err.textContent = "";
+  const email = document.getElementById("email").value.trim();
+  const senha = document.getElementById("senha").value;
+  if (needsSetup && senha !== document.getElementById("confirma").value) {
+    err.textContent = "as senhas não conferem";
+    return;
+  }
+  const res = await fetch(needsSetup ? "/api/setup" : "/api/login", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ email, senha }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data.ok) location.reload();
+  else err.textContent = data.error || "não foi possível entrar";
+});
+</script>
+</body>
+</html>
+"""
 
 INDEX_HTML = r"""<!doctype html>
 <html lang="pt-BR">
@@ -380,6 +603,8 @@ INDEX_HTML = r"""<!doctype html>
     <p>leva os apontamentos do <b class="j">Jira/Clockwork</b> para as planilhas de horas do <b class="o">Odoo</b></p>
   </div>
   <span class="spacer"></span>
+  <span id="whoami" class="muted"></span>
+  <button class="mini" id="btnLogout" style="display:none">sair</button>
   <span id="status" class="pill ok">…</span>
 </div></div>
 
@@ -475,6 +700,27 @@ INDEX_HTML = r"""<!doctype html>
   <div class="actions" style="margin-top:.8rem">
     <button id="btnSaveMapping">💾 Salvar de-para</button>
     <span id="mapMsg" style="font-size:.85rem"></span>
+  </div>
+</section>
+
+<!-- ============ EQUIPE ============ -->
+<section class="card" id="teamCard" style="display:none">
+  <h2>Equipe</h2>
+  <p class="sub">Quem pode entrar neste aplicativo. Somente administradores veem esta seção.</p>
+  <div class="table-wrap">
+  <table id="usersTable">
+    <thead><tr><th>E-mail</th><th>Perfil</th><th style="width:2rem"></th></tr></thead>
+    <tbody></tbody>
+  </table>
+  </div>
+  <div class="actions" style="margin-top:.6rem">
+    <input id="tm_email" type="email" placeholder="email@empresa.com.br"
+           style="font:inherit; font-size:.85rem; padding:.4rem .6rem; border:1px solid var(--line-strong); border-radius:8px">
+    <input id="tm_senha" type="password" placeholder="senha inicial (mín. 8)"
+           style="font:inherit; font-size:.85rem; padding:.4rem .6rem; border:1px solid var(--line-strong); border-radius:8px">
+    <label style="font-size:.82rem"><input type="checkbox" id="tm_admin"> administrador</label>
+    <button class="mini" id="btnTeamAdd">+ adicionar pessoa</button>
+    <span id="teamMsg" style="font-size:.82rem"></span>
   </div>
 </section>
 
@@ -737,10 +983,72 @@ function renderImportLog() {
   }
 }
 
+/* ---------- equipe ---------- */
+let me = null;
+let teamLoaded = false;
+
+async function loadTeam() {
+  const res = await fetch("/api/users");
+  if (!res.ok) return;
+  const data = await res.json();
+  const body = document.querySelector("#usersTable tbody");
+  body.innerHTML = "";
+  for (const u of data.users || []) {
+    const tr = el("tr");
+    tr.appendChild(el("td", {}, u.email));
+    tr.appendChild(el("td", {}, u.admin ? "administrador" : "membro"));
+    const td = el("td");
+    const del = el("button", { className: "del", title: "remover acesso" }, "✕");
+    del.onclick = async () => {
+      const r = await fetch("/api/users/delete", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ email: u.email }),
+      });
+      const d = await r.json().catch(() => ({}));
+      show("teamMsg", r.ok ? "removido" : (d.error || "erro"), r.ok ? "ok-text" : "err-text");
+      loadTeam();
+    };
+    td.appendChild(del);
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+}
+
+async function addTeamMember() {
+  const email = document.getElementById("tm_email").value.trim();
+  const senha = document.getElementById("tm_senha").value;
+  const res = await fetch("/api/users", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ email, senha, admin: document.getElementById("tm_admin").checked }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data.ok) {
+    show("teamMsg", "acesso criado — compartilhe a senha inicial com a pessoa", "ok-text");
+    document.getElementById("tm_email").value = "";
+    document.getElementById("tm_senha").value = "";
+    document.getElementById("tm_admin").checked = false;
+    loadTeam();
+  } else {
+    show("teamMsg", data.error || "não foi possível criar", "err-text");
+  }
+}
+
+function applyUser(user) {
+  me = user || null;
+  document.getElementById("whoami").textContent = me ? me.email : "";
+  document.getElementById("btnLogout").style.display = me ? "" : "none";
+  const card = document.getElementById("teamCard");
+  card.style.display = me && me.admin ? "" : "none";
+  if (me && me.admin && !teamLoaded) { teamLoaded = true; loadTeam(); }
+}
+
 /* ---------- ciclo ---------- */
 async function refresh() {
   try {
-    const state = await (await fetch("/api/state")).json();
+    const res = await fetch("/api/state");
+    if (res.status === 401) { location.reload(); return; }
+    const state = await res.json();
+    applyUser(state.user);
     const status = document.getElementById("status");
     if (state.running) { status.className = "pill warn"; status.textContent = "⏳ sincronizando…"; }
     else { status.className = "pill ok"; status.textContent = "pronto"; }
@@ -757,6 +1065,11 @@ async function refresh() {
   } catch (e) { /* servidor reiniciando */ }
 }
 
+document.getElementById("btnLogout").addEventListener("click", async () => {
+  await fetch("/api/logout", { method: "POST" });
+  location.reload();
+});
+document.getElementById("btnTeamAdd").addEventListener("click", addTeamMember);
 document.getElementById("btnSync").addEventListener("click", () => runSync(false));
 document.getElementById("btnDry").addEventListener("click", () => runSync(true));
 document.getElementById("btnSaveCfg").addEventListener("click", saveConfig);
@@ -787,10 +1100,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--import-log-file", default=storage.DEFAULT_IMPORT_LOG_FILE)
     parser.add_argument("--log-file", default=DEFAULT_RUN_LOG_FILE)
     parser.add_argument("--env-file", default=DEFAULT_ENV_FILE)
+    parser.add_argument("--users-file", default=auth.DEFAULT_USERS_FILE)
+    parser.add_argument(
+        "--add-user",
+        metavar="EMAIL",
+        help="cadastra (ou redefine a senha de) um administrador pelo terminal e sai",
+    )
     parser.add_argument(
         "--no-browser", action="store_true", help="não abrir o navegador automaticamente"
     )
     args = parser.parse_args(argv)
+
+    if args.add_user:
+        import getpass
+
+        senha = getpass.getpass(f"senha para {args.add_user}: ")
+        try:
+            auth.add_user(Path(args.users_file), args.add_user, senha, admin=True)
+        except ValueError as exc:
+            print(f"erro: {exc}")
+            return 2
+        print("usuário administrador salvo.")
+        return 0
 
     configure_logging(log_file=args.log_file or None)
     load_env_file(args.env_file)
@@ -801,7 +1132,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.import_log_file),
         Path(args.env_file),
     )
-    server = App((args.host, args.port), runner)
+    server = App((args.host, args.port), runner, Path(args.users_file))
     url = f"http://{args.host}:{server.server_address[1]}/"
     print(f"Aplicativo disponível em {url}")
     if not args.no_browser:
