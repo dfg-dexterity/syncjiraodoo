@@ -140,6 +140,15 @@ A forma recomendada de configurar os mapeamentos é o arquivo **`mapping.json`**
   quando o perfil Atlassian oculta o e-mail).
 - **`restrict_to_mapped_projects`** — com `true`, só os projetos mapeados são
   sincronizados (a menos que `JIRA_PROJECT_KEYS`/`--projects` digam outra coisa).
+  Projetos com roteamento por departamento contam como mapeados.
+- **`department_routing`** — roteamento por departamento: nos projetos Jira
+  listados (ex.: Tarefas Avulsas/Administrativas), o projeto Odoo é decidido
+  pelo valor de um campo da issue (ex.: "Departamento Dexterity"), não pela
+  key. `{"field": "Departamento Dexterity", "projects": ["TAV", "TADM"],
+  "map": [{"departamento": "Financeiro", "odoo": "Administrativo | Financeiro"}]}`.
+  Issues com o campo vazio ou valor sem de-para geram aviso e são puladas
+  (nada se perde: corrija e rode de novo com `--since` retroativo). O projeto
+  Odoo de destino precisa existir — nunca é criado automaticamente.
 - O arquivo tem precedência sobre `JIRA_ODOO_PROJECT_MAP` /
   `JIRA_ODOO_EMPLOYEE_MAP`, que continuam funcionando.
 

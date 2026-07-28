@@ -167,5 +167,10 @@
       "odoo": "anajulia@dexterityit.com.br",
       "nome": "Ana Júlia Marianno de Campos"
     }
-  ]
+  ],
+  "department_routing": {
+    "field": "Departamento Dexterity",
+    "projects": [],
+    "map": []
+  }
 }

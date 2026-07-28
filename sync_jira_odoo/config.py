@@ -55,14 +55,24 @@ class Config:
     employee_map: dict[str, str] = field(default_factory=dict)
     # E-mail de funcionário usado quando o autor não pôde ser resolvido.
     default_employee_email: str = ""
+    # Roteamento por departamento (ver Mapping.department_routing): nos
+    # projetos Jira listados, o projeto Odoo vem do valor deste campo da issue.
+    department_field: str = ""
+    department_projects: list[str] = field(default_factory=list)
+    department_map: dict[str, str] = field(default_factory=dict)
 
     def apply_mapping(self, mapping) -> None:
         """Mescla uma tabela de-para (mapping.json); o arquivo tem precedência
         sobre os mapas vindos de variáveis de ambiente."""
         self.project_map.update(mapping.project_map())
         self.employee_map.update(mapping.employee_map())
+        self.department_field = mapping.department_field()
+        self.department_projects = mapping.department_projects()
+        self.department_map = mapping.department_map()
         if mapping.restrict_to_mapped_projects and not self.jira_project_keys:
-            self.jira_project_keys = sorted(mapping.project_map())
+            self.jira_project_keys = sorted(
+                set(mapping.project_map()) | set(self.department_projects)
+            )
 
     @classmethod
     def from_env(cls) -> "Config":

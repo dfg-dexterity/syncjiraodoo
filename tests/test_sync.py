@@ -262,3 +262,77 @@ class SyncEngineTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DepartmentRoutingTest(unittest.TestCase):
+    """Projetos como Tarefas Avulsas/Administrativas: o projeto Odoo vem do
+    campo 'Departamento Dexterity' da issue, não da key do Jira."""
+
+    FIELD_ID = "customfield_10052"
+
+    def make_engine(self, dept_value, odoo_projects=None, department_map=None):
+        issue = make_issue(
+            key="TAV-12",
+            summary="Compra de monitores",
+            project_key="TAV",
+            project_name="Tarefas Avulsas",
+            extra_fields={self.FIELD_ID: dept_value},
+        )
+        self.odoo = make_odoo_with_employee()
+        if odoo_projects:
+            self.odoo.data["project.project"] = odoo_projects
+        self.jira = FakeJira(
+            [make_worklog(issue_id="900")],
+            {"900": issue},
+            fields={"Departamento Dexterity": self.FIELD_ID},
+        )
+        cfg = make_config(
+            department_field="Departamento Dexterity",
+            department_projects=["TAV", "TADM"],
+            department_map=department_map
+            or {"financeiro": "Administrativo | Financeiro"},
+        )
+        return SyncEngine(self.jira, self.odoo, cfg)
+
+    def test_routes_by_department_field(self):
+        engine = self.make_engine(
+            {"value": "Financeiro"},
+            odoo_projects=[{"id": 88, "name": "Administrativo | Financeiro"}],
+        )
+        result = engine.run(SINCE)
+        self.assertEqual(result.created, 1)
+        self.assertEqual(result.warnings, [])
+        line = self.odoo.data["account.analytic.line"][0]
+        self.assertEqual(line["project_id"], 88)
+        # nenhum projeto "[TAV] ..." foi criado pela key
+        names = [p["name"] for p in self.odoo.data["project.project"]]
+        self.assertEqual(names, ["Administrativo | Financeiro"])
+
+    def test_empty_department_skips_with_warning(self):
+        engine = self.make_engine(None,
+            odoo_projects=[{"id": 88, "name": "Administrativo | Financeiro"}])
+        result = engine.run(SINCE)
+        self.assertEqual((result.created, result.skipped), (0, 1))
+        self.assertIn("vazio", " ".join(result.warnings))
+
+    def test_unmapped_department_skips_with_warning(self):
+        engine = self.make_engine({"value": "Comercial"},
+            odoo_projects=[{"id": 88, "name": "Administrativo | Financeiro"}])
+        result = engine.run(SINCE)
+        self.assertEqual((result.created, result.skipped), (0, 1))
+        self.assertIn("Comercial", " ".join(result.warnings))
+
+    def test_missing_field_in_jira_warns_once(self):
+        engine = self.make_engine({"value": "Financeiro"})
+        engine.jira.fields = {}  # campo não existe no Jira
+        result = engine.run(SINCE)
+        self.assertEqual((result.created, result.skipped), (0, 1))
+        self.assertIn("não encontrado", " ".join(result.warnings))
+
+    def test_text_field_and_case_insensitive_value(self):
+        engine = self.make_engine(
+            "FINANCEIRO",  # campo texto puro, caixa diferente
+            odoo_projects=[{"id": 88, "name": "Administrativo | Financeiro"}],
+        )
+        result = engine.run(SINCE)
+        self.assertEqual(result.created, 1)

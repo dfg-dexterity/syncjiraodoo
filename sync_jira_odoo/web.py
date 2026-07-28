@@ -260,6 +260,7 @@ class Handler(BaseHTTPRequestHandler):
                         "restrict_to_mapped_projects": mapping.restrict_to_mapped_projects,
                         "projects": mapping.projects,
                         "users": mapping.users,
+                        "department_routing": mapping.department_routing,
                     },
                     "history": list(reversed(history[-50:])),
                     "log": list(runner.log_buffer),
@@ -370,6 +371,7 @@ class Handler(BaseHTTPRequestHandler):
                 restrict_to_mapped_projects=bool(data.get("restrict_to_mapped_projects")),
                 projects=list(data.get("projects", [])),
                 users=list(data.get("users", [])),
+                department_routing=dict(data.get("department_routing", {})),
             )
             errors = mapping.validate()
             if errors:
@@ -712,6 +714,29 @@ INDEX_HTML = r"""<!doctype html>
   </table>
   </div>
   <button class="mini" onclick="addUserRow()">+ adicionar pessoa</button>
+
+  <h2 style="margin-top:1.4rem">Roteamento por departamento</h2>
+  <p class="sub">Para projetos como <b>Tarefas Avulsas</b> e <b>Tarefas Administrativas</b>, o projeto do
+  Odoo não vem da key do Jira: vem do valor do campo da issue (ex.: "Departamento Dexterity").
+  Preencha o campo, as keys desses projetos e a tabela departamento → projeto Odoo.</p>
+  <div class="actions" style="margin-bottom:.5rem">
+    <label style="font-size:.85rem">Campo na issue do Jira:
+      <input type="text" id="deptField" placeholder="Departamento Dexterity"
+             style="font:inherit; font-size:.85rem; padding:.35rem .6rem; border:1px solid var(--line-strong); border-radius:8px; min-width:220px"></label>
+    <label style="font-size:.85rem">Projetos Jira com roteamento (keys):
+      <input type="text" id="deptProjects" placeholder="TAV, TADM"
+             style="font:inherit; font-size:.85rem; padding:.35rem .6rem; border:1px solid var(--line-strong); border-radius:8px; min-width:160px"></label>
+  </div>
+  <div class="table-wrap">
+  <table id="deptTable">
+    <thead><tr><th>Departamento (valor exato no Jira)</th>
+    <th>Projeto no Odoo (nome exato)</th>
+    <th style="width:2rem"></th></tr></thead>
+    <tbody></tbody>
+  </table>
+  </div>
+  <button class="mini" onclick="addDeptRow()">+ adicionar departamento</button>
+
   <div class="actions" style="margin-top:.8rem">
     <button id="btnSaveMapping">💾 Salvar de-para</button>
     <span id="mapMsg" style="font-size:.85rem"></span>
@@ -873,8 +898,23 @@ function userRow(jira = "", odoo = "", nome = "") {
   tr.appendChild(td);
   return tr;
 }
+function deptRow(departamento = "", odoo = "") {
+  const tr = el("tr");
+  for (const value of [departamento, odoo]) {
+    const td = el("td");
+    td.appendChild(el("input", { type: "text", value }));
+    tr.appendChild(td);
+  }
+  const td = el("td");
+  const del = el("button", { className: "del", title: "remover" }, "✕");
+  del.onclick = () => tr.remove();
+  td.appendChild(del);
+  tr.appendChild(td);
+  return tr;
+}
 function addProjectRow() { document.querySelector("#projTable tbody").appendChild(projectRow()); }
 function addUserRow() { document.querySelector("#userTable tbody").appendChild(userRow()); }
+function addDeptRow() { document.querySelector("#deptTable tbody").appendChild(deptRow()); }
 
 function renderMapping(mapping) {
   const projBody = document.querySelector("#projTable tbody");
@@ -886,6 +926,13 @@ function renderMapping(mapping) {
   for (const row of mapping.users)
     userBody.appendChild(userRow(row.jira || "", row.odoo || "", row.nome || ""));
   document.getElementById("restrict").checked = !!mapping.restrict_to_mapped_projects;
+  const routing = mapping.department_routing || {};
+  document.getElementById("deptField").value = routing.field || "";
+  document.getElementById("deptProjects").value = (routing.projects || []).join(", ");
+  const deptBody = document.querySelector("#deptTable tbody");
+  deptBody.innerHTML = "";
+  for (const row of routing.map || [])
+    deptBody.appendChild(deptRow(row.departamento || "", row.odoo || ""));
 }
 function collectMapping() {
   const projects = [...document.querySelectorAll("#projTable tbody tr")].map(tr => {
@@ -896,9 +943,19 @@ function collectMapping() {
     const [jira, odoo, nome] = [...tr.querySelectorAll("input")].map(i => i.value.trim());
     return { jira, odoo, nome };
   }).filter(r => r.jira || r.odoo);
+  const deptMap = [...document.querySelectorAll("#deptTable tbody tr")].map(tr => {
+    const [departamento, odoo] = [...tr.querySelectorAll("input")].map(i => i.value.trim());
+    return { departamento, odoo };
+  }).filter(r => r.departamento || r.odoo);
+  const deptField = document.getElementById("deptField").value.trim();
+  const deptProjects = document.getElementById("deptProjects").value
+    .split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+  const department_routing = (deptField || deptProjects.length || deptMap.length)
+    ? { field: deptField, projects: deptProjects, map: deptMap }
+    : {};
   return {
     restrict_to_mapped_projects: document.getElementById("restrict").checked,
-    projects, users,
+    projects, users, department_routing,
   };
 }
 async function saveMapping() {
