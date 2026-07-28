@@ -447,6 +447,9 @@ LOGIN_HTML = r"""<!doctype html>
     <label>Confirme a senha</label>
     <input id="confirma" type="password" autocomplete="new-password" minlength="8">
   </div>
+  <label style="display:flex; gap:.4rem; align-items:center; font-size:.8rem; color:#5d6674; margin-top:.7rem">
+    <input type="checkbox" id="verSenha" style="width:auto"> mostrar senhas
+  </label>
   <button type="submit" id="btn">Entrar</button>
   <div id="err"></div>
 </form>
@@ -461,7 +464,16 @@ fetch("/api/auth-state").then(r => r.json()).then(data => {
       "Este será o usuário administrador do Sincronizador de Horas.";
     document.getElementById("confirmWrap").style.display = "";
     document.getElementById("btn").textContent = "Criar e entrar";
+    // impede o navegador de sobrescrever o campo com senha gerada/salva
+    const senhaInput = document.getElementById("senha");
+    senhaInput.setAttribute("autocomplete", "new-password");
+    senhaInput.value = "";
   }
+});
+document.getElementById("verSenha").addEventListener("change", event => {
+  const type = event.target.checked ? "text" : "password";
+  document.getElementById("senha").type = type;
+  document.getElementById("confirma").type = type;
 });
 document.getElementById("form").addEventListener("submit", async event => {
   event.preventDefault();
