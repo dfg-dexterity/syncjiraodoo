@@ -28,6 +28,7 @@ from http.cookies import SimpleCookie
 from . import auth, storage
 from .config import Config, ConfigError
 from .envfile import DEFAULT_ENV_FILE, load_env_file, save_env_file
+from .github_client import DEFAULT_BUG_REPO, GitHubError, create_issue
 from .jira_client import JiraClient
 from .logsetup import DEFAULT_RUN_LOG_FILE, configure_logging
 from .mapping import Mapping
@@ -39,9 +40,11 @@ from .sync import SyncEngine, connection_report
 CONFIG_KEYS = (
     "ODOO_URL", "ODOO_DB", "ODOO_USER", "ODOO_API_KEY",
     "JIRA_URL", "JIRA_USER", "JIRA_API_TOKEN", "DEFAULT_EMPLOYEE_EMAIL",
+    "GITHUB_TOKEN", "GITHUB_REPO",
 )
-SECRET_KEYS = {"ODOO_API_KEY", "JIRA_API_TOKEN"}
-REQUIRED_KEYS = tuple(k for k in CONFIG_KEYS if k != "DEFAULT_EMPLOYEE_EMAIL")
+SECRET_KEYS = {"ODOO_API_KEY", "JIRA_API_TOKEN", "GITHUB_TOKEN"}
+OPTIONAL_KEYS = {"DEFAULT_EMPLOYEE_EMAIL", "GITHUB_TOKEN", "GITHUB_REPO"}
+REQUIRED_KEYS = tuple(k for k in CONFIG_KEYS if k not in OPTIONAL_KEYS)
 
 log = logging.getLogger("sync_jira_odoo")
 
@@ -332,6 +335,52 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path == "/api/bug":
+            data = self._read_json()
+            titulo = str(data.get("titulo", "")).strip()
+            descricao = str(data.get("descricao", "")).strip()
+            if not titulo or not descricao:
+                self._send_json({"ok": False, "error": "preencha o título e a descrição"}, 400)
+                return
+            token = os.environ.get("GITHUB_TOKEN", "").strip()
+            if not token:
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": "reporte de bugs não configurado: informe o token do "
+                        "GitHub na seção Conexões",
+                    },
+                    400,
+                )
+                return
+            repo = os.environ.get("GITHUB_REPO", "").strip() or DEFAULT_BUG_REPO
+            corpo = [
+                f"**Reportado por:** {user['email']} (pelo aplicativo Sincronizador de Horas)",
+                "",
+                "## Descrição",
+                "",
+                descricao,
+            ]
+            history = storage.read_history(runner.history_path)
+            if history:
+                last = history[0]
+                resultado = "ok" if last.get("ok") else f"erro: {last.get('error', '?')}"
+                corpo += [
+                    "",
+                    "---",
+                    f"**Última execução:** {last.get('finished_utc', '?')} — {resultado} "
+                    f"({'simulação' if last.get('dry_run') else 'real'}; "
+                    f"{last.get('created', 0)} criados, {last.get('updated', 0)} atualizados, "
+                    f"{len(last.get('warnings', []))} avisos)",
+                ]
+            try:
+                issue_url = create_issue(repo, token, f"[bug] {titulo}", "\n".join(corpo))
+            except GitHubError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 502)
+                return
+            log.info("bug reportado por %s: %s", user["email"], issue_url)
+            self._send_json({"ok": True, "url": issue_url})
+            return
         if self.path in ("/api/users", "/api/users/delete"):
             if not user["admin"]:
                 self._send_json({"error": "somente administradores"}, status=403)
@@ -586,10 +635,10 @@ INDEX_HTML = r"""<!doctype html>
   fieldset.f-odoo legend { color: var(--odoo); }
   .field { margin-top: .6rem; }
   .field label { display: block; font-size: .76rem; font-weight: 600; color: var(--muted); margin-bottom: .2rem; }
-  .field input {
+  .field input, .field textarea {
     width: 100%; font: inherit; font-size: .88rem; padding: .45rem .6rem;
     border: 1px solid var(--line-strong); border-radius: 8px;
-    background: var(--surface); color: var(--ink);
+    background: var(--surface); color: var(--ink); resize: vertical;
   }
   #cfgMsg, #msg { margin-top: .7rem; font-size: .85rem; white-space: pre-wrap; }
   .ok-text { color: var(--ok); } .err-text { color: var(--err); } .warn-text { color: var(--warn); }
@@ -621,11 +670,29 @@ INDEX_HTML = r"""<!doctype html>
   </div>
   <span class="spacer"></span>
   <span id="whoami" class="muted"></span>
+  <button class="mini" id="btnBug" title="algo deu errado? conte para a TI">🐞 Reportar problema</button>
   <button class="mini" id="btnLogout" style="display:none">sair</button>
   <span id="status" class="pill ok">…</span>
 </div></div>
 
 <main>
+
+<!-- ============ REPORTAR BUG ============ -->
+<section class="card" id="bugCard" style="display:none">
+  <h2>🐞 Reportar um problema</h2>
+  <p class="sub">Descreva o que aconteceu. O relato vira um chamado para a equipe de TI
+  (issue no GitHub), já com o seu e-mail e o resumo da última execução anexados.</p>
+  <div class="field"><label>Título curto</label>
+    <input id="bugTitle" placeholder="ex.: horas do projeto Fiagril não apareceram no Odoo"></div>
+  <div class="field"><label>O que aconteceu?</label>
+    <textarea id="bugDesc" rows="5"
+      placeholder="conte o que você estava fazendo, o que esperava e o que apareceu (inclua issue/projeto/data se souber)…"></textarea></div>
+  <div class="actions" style="margin-top:.8rem">
+    <button id="btnBugSend">Enviar relato</button>
+    <button class="mini" id="btnBugCancel">cancelar</button>
+    <span id="bugMsg" style="font-size:.85rem"></span>
+  </div>
+</section>
 
 <!-- ============ SINCRONIZAR ============ -->
 <section class="card">
@@ -678,6 +745,13 @@ INDEX_HTML = r"""<!doctype html>
           <input id="cfg_ODOO_USER" placeholder="voce@suaempresa.com.br"></div>
         <div class="field"><label>Chave de API <span class="muted">(Preferências → Segurança da Conta)</span></label>
           <input id="cfg_ODOO_API_KEY" type="password" autocomplete="off"></div>
+      </fieldset>
+      <fieldset>
+        <legend>GitHub — reporte de bugs (opcional)</legend>
+        <div class="field"><label>Repositório</label>
+          <input id="cfg_GITHUB_REPO" placeholder="dfg-dexterity/syncjiraodoo"></div>
+        <div class="field"><label>Token <span class="muted">(github.com → Settings → Developer settings → Fine-grained tokens, permissão Issues: write)</span></label>
+          <input id="cfg_GITHUB_TOKEN" type="password" autocomplete="off"></div>
       </fieldset>
     </div>
     <div class="actions" style="margin-top:.9rem">
@@ -820,8 +894,9 @@ function show(id, text, cls) {
 
 /* ---------- conexões ---------- */
 const CFG_KEYS = ["ODOO_URL","ODOO_DB","ODOO_USER","ODOO_API_KEY",
-                  "JIRA_URL","JIRA_USER","JIRA_API_TOKEN"];
-const CFG_SECRETS = ["ODOO_API_KEY","JIRA_API_TOKEN"];
+                  "JIRA_URL","JIRA_USER","JIRA_API_TOKEN",
+                  "GITHUB_REPO","GITHUB_TOKEN"];
+const CFG_SECRETS = ["ODOO_API_KEY","JIRA_API_TOKEN","GITHUB_TOKEN"];
 
 async function loadConfig() {
   const data = await (await fetch("/api/config")).json();
@@ -1136,6 +1211,40 @@ async function refresh() {
     wasRunning = state.running;
   } catch (e) { /* servidor reiniciando */ }
 }
+
+/* ---------- reportar problema ---------- */
+document.getElementById("btnBug").addEventListener("click", () => {
+  const card = document.getElementById("bugCard");
+  const hidden = card.style.display === "none";
+  card.style.display = hidden ? "" : "none";
+  if (hidden) { card.scrollIntoView({ behavior: "smooth" }); document.getElementById("bugTitle").focus(); }
+});
+document.getElementById("btnBugCancel").addEventListener("click", () => {
+  document.getElementById("bugCard").style.display = "none";
+});
+document.getElementById("btnBugSend").addEventListener("click", async () => {
+  const titulo = document.getElementById("bugTitle").value.trim();
+  const descricao = document.getElementById("bugDesc").value.trim();
+  const msg = document.getElementById("bugMsg");
+  msg.className = ""; msg.textContent = "enviando…";
+  const res = await fetch("/api/bug", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ titulo, descricao }),
+  });
+  const data = await res.json().catch(() => ({}));
+  msg.innerHTML = "";
+  if (res.ok && data.ok) {
+    document.getElementById("bugTitle").value = "";
+    document.getElementById("bugDesc").value = "";
+    msg.className = "ok-text";
+    msg.appendChild(document.createTextNode("registrado! acompanhe em "));
+    const link = el("a", { href: data.url, target: "_blank" }, data.url);
+    msg.appendChild(link);
+  } else {
+    msg.className = "err-text";
+    msg.textContent = data.error || "não foi possível registrar";
+  }
+});
 
 document.getElementById("btnLogout").addEventListener("click", async () => {
   await fetch("/api/logout", { method: "POST" });

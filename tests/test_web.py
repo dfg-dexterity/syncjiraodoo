@@ -5,6 +5,7 @@ import os
 import tempfile
 import threading
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -130,6 +131,42 @@ class WebTest(unittest.TestCase):
         status, data = self._request("/api/users", cookie="use-session")
         emails = [u["email"] for u in data["users"]]
         self.assertIn("membro@exemplo.com.br", emails)
+
+    def test_bug_report_creates_github_issue(self):
+        os.environ["GITHUB_TOKEN"] = "token-teste"
+        try:
+            with unittest.mock.patch(
+                "sync_jira_odoo.web.create_issue",
+                return_value="https://github.com/dfg-dexterity/syncjiraodoo/issues/9",
+            ) as fake:
+                status, data = self._request(
+                    "/api/bug", {"titulo": "horas sumiram", "descricao": "detalhe do problema"}
+                )
+        finally:
+            os.environ.pop("GITHUB_TOKEN", None)
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertIn("/issues/9", data["url"])
+        repo, token, title, body = fake.call_args[0]
+        self.assertEqual(repo, "dfg-dexterity/syncjiraodoo")
+        self.assertEqual(title, "[bug] horas sumiram")
+        self.assertIn(ADMIN, body)  # quem reportou vai no corpo
+        self.assertIn("detalhe do problema", body)
+        self.assertIn("Última execução", body)
+
+    def test_bug_report_requires_fields_and_token(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/bug", {"titulo": "", "descricao": ""})
+        self.assertEqual(ctx.exception.code, 400)
+        os.environ.pop("GITHUB_TOKEN", None)
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/bug", {"titulo": "x", "descricao": "y"})
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_bug_report_requires_login(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/bug", {"titulo": "x", "descricao": "y"}, cookie=None)
+        self.assertEqual(ctx.exception.code, 401)
 
     def test_config_get_masks_secrets(self):
         os.environ["ODOO_API_KEY"] = "segredo-que-nao-volta"

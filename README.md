@@ -21,6 +21,13 @@ A mesma tela edita o de-para de projetos/pessoas e mostra a atividade:
 resumo de cada execução, cada apontamento importado no Odoo (com filtro) e o
 log técnico.
 
+**🐞 Reportar problema:** o botão no topo abre um formulário (título +
+descrição) que registra o relato como **issue no GitHub** do projeto, com o
+e-mail de quem reportou e o resumo da última execução anexados. Requer
+configurar na seção Conexões um token do GitHub (fine-grained, permissão
+*Issues: write* no repositório; variáveis `GITHUB_TOKEN` e `GITHUB_REPO`,
+repositório padrão `dfg-dexterity/syncjiraodoo`).
+
 ## Acesso da equipe (usuário e senha)
 
 - **Todo acesso exige login.** Senhas ficam com hash `scrypt` + salt em
