@@ -67,6 +67,17 @@ class JiraClient:
     def myself(self) -> dict:
         return self._request("GET", "/rest/api/3/myself")
 
+    def find_field_id(self, name: str) -> str | None:
+        """Localiza o id de um campo (ex.: 'customfield_10052') pelo nome
+        visível (ex.: 'Departamento Dexterity'), sem diferenciar maiúsculas."""
+        target = name.strip().lower()
+        if not target:
+            return None
+        for field in self._request("GET", "/rest/api/3/field") or []:
+            if str(field.get("name", "")).strip().lower() == target:
+                return field.get("id")
+        return None
+
     def _changed_worklog_ids(self, endpoint: str, since_ms: int) -> Iterator[int]:
         """Pagina /worklog/updated ou /worklog/deleted a partir de since_ms."""
         since = since_ms

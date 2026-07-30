@@ -4,6 +4,80 @@ Sincroniza apontamentos de horas do **Jira/Clockwork Pro** para timesheets do
 **Odoo Online**, usando apenas a biblioteca padrão do Python (`xmlrpc.client`
 para o Odoo, `urllib` para o Jira). Sem dependências externas.
 
+## Início rápido (sem terminal)
+
+1. **Abra o aplicativo:** dê **duplo clique em `Iniciar Sincronizador.command`**
+   (macOS) — ou rode `python3 -m sync_jira_odoo.web`. O navegador abre sozinho.
+2. **Crie o primeiro acesso:** na primeira abertura, o app pede um e-mail e
+   senha para o **usuário administrador**. Depois, todo acesso exige login.
+3. **Configure as conexões na própria tela** (seção "Conexões"): endereço e
+   credenciais do Jira e do Odoo, com botão *Testar conexões*. Fica salvo no
+   `.env` local (fora do git) e carregado automaticamente nas próximas vezes —
+   ninguém precisa exportar variáveis.
+4. **Clique em "Simular (não grava nada)"** para conferir o que entraria e,
+   estando tudo certo, **"▶ Sincronizar agora"**.
+
+A mesma tela edita o de-para de projetos/pessoas e mostra a atividade:
+resumo de cada execução, cada apontamento importado no Odoo (com filtro) e o
+log técnico.
+
+**🐞 Reportar problema:** o botão no topo abre um formulário (título +
+descrição) que registra o relato como **issue no GitHub** do projeto, com o
+e-mail de quem reportou e o resumo da última execução anexados. Requer
+configurar na seção Conexões um token do GitHub (fine-grained, permissão
+*Issues: write* no repositório; variáveis `GITHUB_TOKEN` e `GITHUB_REPO`,
+repositório padrão `dfg-dexterity/syncjiraodoo`).
+
+## Acesso da equipe (usuário e senha)
+
+- **Todo acesso exige login.** Senhas ficam com hash `scrypt` + salt em
+  `.users.json` (permissão 0600, fora do git); sessões expiram em 12 h e
+  caem quando o app reinicia.
+- **Administradores** veem a seção **Equipe** no app: adicionam pessoas
+  (e-mail + senha inicial, opcionalmente administrador) e removem acessos.
+  O último administrador não pode ser removido.
+- **Recuperação pelo terminal:** `python3 -m sync_jira_odoo.web --add-user
+  email@empresa.com.br` cadastra (ou redefine a senha de) um administrador.
+- **Para o time acessar na rede interna:** rode o app numa máquina fixa com
+  `--host 0.0.0.0` e compartilhe `http://ip-da-maquina:8765`.
+- **Para acessar pela internet:** use o kit pronto da seção seguinte —
+  nunca exponha a porta 8765 diretamente (HTTP puro, senha em claro).
+
+## Publicar na internet (HTTPS automático)
+
+O repositório traz um kit Docker pronto (`Dockerfile`, `docker-compose.yml`,
+`Caddyfile`): o Caddy emite e renova o certificado HTTPS sozinho e repassa o
+tráfego ao aplicativo; com HTTPS na frente, o cookie de sessão sai com o
+flag `Secure`. Como Jira e Odoo são serviços na nuvem, o app pode morar em
+qualquer servidor.
+
+**Passo a passo (VPS de ~US$ 5/mês — Hetzner, DigitalOcean, Lightsail…):**
+
+1. Crie um servidor Ubuntu com Docker instalado
+   (`curl -fsSL https://get.docker.com | sh`).
+2. No seu DNS, aponte um subdomínio para o IP do servidor
+   (ex.: `horas.suaempresa.com.br → A → IP`).
+3. No servidor:
+   ```bash
+   git clone https://github.com/dfg-dexterity/syncjiraodoo.git
+   cd syncjiraodoo
+   echo "APP_DOMAIN=horas.suaempresa.com.br" > .env.compose
+   docker compose --env-file .env.compose up -d --build
+   ```
+4. Abra `https://horas.suaempresa.com.br`, crie o usuário administrador e
+   configure as conexões pela tela. Tudo que persiste (credenciais,
+   usuários, de-para, estado e logs) fica no volume `sjo_data`.
+
+**Alternativa sem servidor (túnel):** rodando o app numa máquina do
+escritório que fique sempre ligada, um
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+publica `http://localhost:8765` num domínio seu com HTTPS, sem abrir porta
+no roteador. Bom para começar; o VPS é a opção mais estável.
+
+Recomendações para exposição pública: senhas longas para todos os usuários,
+mantenha o servidor atualizado e acompanhe a seção Atividade — todo acesso
+ao app exige login e toda importação fica registrada.
+
 > O Clockwork Pro grava os apontamentos como **worklogs nativos do Jira**;
 > por isso o sync lê a API nativa de worklogs (`/rest/api/3/worklog/*`) e
 > cobre tudo que é registrado pelo Clockwork — timers, ajustes manuais e
@@ -73,6 +147,15 @@ A forma recomendada de configurar os mapeamentos é o arquivo **`mapping.json`**
   quando o perfil Atlassian oculta o e-mail).
 - **`restrict_to_mapped_projects`** — com `true`, só os projetos mapeados são
   sincronizados (a menos que `JIRA_PROJECT_KEYS`/`--projects` digam outra coisa).
+  Projetos com roteamento por departamento contam como mapeados.
+- **`department_routing`** — roteamento por departamento: nos projetos Jira
+  listados (ex.: Tarefas Avulsas/Administrativas), o projeto Odoo é decidido
+  pelo valor de um campo da issue (ex.: "Departamento Dexterity"), não pela
+  key. `{"field": "Departamento Dexterity", "projects": ["TAV", "TADM"],
+  "map": [{"departamento": "Financeiro", "odoo": "Administrativo | Financeiro"}]}`.
+  Issues com o campo vazio ou valor sem de-para geram aviso e são puladas
+  (nada se perde: corrija e rode de novo com `--since` retroativo). O projeto
+  Odoo de destino precisa existir — nunca é criado automaticamente.
 - O arquivo tem precedência sobre `JIRA_ODOO_PROJECT_MAP` /
   `JIRA_ODOO_EMPLOYEE_MAP`, que continuam funcionando.
 
@@ -121,6 +204,39 @@ Agendamento via cron (a cada 30 min):
 ```cron
 */30 * * * * cd /opt/syncjiraodoo && set -a && . ./.env && set +a && python3 -m sync_jira_odoo >> sync.log 2>&1
 ```
+
+## Administração compartilhada
+
+Para outra pessoa administrar a integração, ela precisa de três coisas:
+
+1. **Acesso ao código** — no GitHub: *Settings → Collaborators and teams →
+   Add people*, papel **Write** (edita `mapping.json`, abre PRs) ou **Admin**
+   (gerencia o repositório).
+2. **Credenciais próprias** — nunca compartilhe chaves pessoais:
+   - **Odoo:** o ideal é um usuário de serviço (ex.: `integracao@…`) com
+     acesso a Projetos, Planilhas de Horas e Funcionários; a pessoa gera a
+     chave em *Preferências → Segurança da Conta → Chaves de API*.
+   - **Jira:** cada administrador cria seu token em
+     <https://id.atlassian.com/manage-profile/security/api-tokens>; a conta
+     precisa enxergar todos os projetos mapeados (os worklogs visíveis
+     seguem a permissão do token).
+   - As credenciais ficam no `.env` da máquina que executa (fora do git).
+3. **Acesso à máquina que executa** — para operação realmente compartilhada,
+   rode em uma máquina fixa (servidor interno) com cron, em vez do laptop de
+   alguém. A interface web (`python3 -m sync_jira_odoo.web`) não tem
+   autenticação: mantenha em `127.0.0.1` ou rede interna confiável.
+
+## Arquivos de estado e logs
+
+Todos ficam no diretório de execução, fora do versionamento:
+
+| Arquivo | Conteúdo |
+|---|---|
+| `.sync_state.json` | ponto de avanço incremental (última execução ok) |
+| `.sync_history.json` | resumo das últimas 200 execuções (contadores + avisos) — alimenta o Monitor da interface web |
+| `.sync_import_log.jsonl` | um registro por timesheet criado/atualizado/removido no Odoo (últimos 5 000) — seção "Importados no Odoo" da interface web; dry-run não grava |
+| `.sync_run.log` (+ `.1`…`.3`) | log completo de execução (cada linha do que o sync fez), rotativo em 2 MB × 3 — `--log-file` muda o caminho, `--log-file ''` desativa |
+| `.users.json` | usuários do aplicativo (hash de senha `scrypt` + salt; nunca a senha) |
 
 ## Decisões de mapeamento
 

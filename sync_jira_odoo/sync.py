@@ -57,6 +57,18 @@ def _m2o_id(value) -> int | None:
     return value or None
 
 
+def _field_text(value) -> str:
+    """Extrai o texto de um campo do Jira: select ({'value': ...}), texto puro
+    ou lista (multi-select — usa o primeiro valor)."""
+    if isinstance(value, dict):
+        return str(value.get("value") or value.get("name") or "").strip()
+    if isinstance(value, list):
+        return _field_text(value[0]) if value else ""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 @dataclass
 class SyncResult:
     created: int = 0
@@ -80,6 +92,10 @@ class SyncEngine:
         self._project_cache: dict[str, int | None] = {}
         self._task_cache: dict[str, int] = {}
         self._employee_cache: dict[str, int | None] = {}
+        self._routing_projects = {k.upper() for k in config.department_projects}
+        self._dept_field_id: str | None = None
+        self._issue_fields: tuple[str, ...] = ("summary", "project")
+        self._warned_departments: set[str] = set()
 
     # ------------------------------------------------------------------ run
 
@@ -91,6 +107,16 @@ class SyncEngine:
     ) -> SyncResult:
         result = SyncResult()
         since_ms = int(since.timestamp() * 1000)
+
+        if self._routing_projects:
+            self._dept_field_id = self.jira.find_field_id(self.cfg.department_field)
+            if self._dept_field_id:
+                self._issue_fields = ("summary", "project", self._dept_field_id)
+            else:
+                result.warn(
+                    f"campo '{self.cfg.department_field}' não encontrado no Jira; "
+                    f"worklogs de {', '.join(sorted(self._routing_projects))} serão pulados"
+                )
 
         ids = self.jira.updated_worklog_ids(since_ms)
         log.info("worklogs alterados desde %s: %d", since.isoformat(), len(ids))
@@ -124,7 +150,7 @@ class SyncEngine:
 
     def _sync_worklog(self, worklog: dict, result: SyncResult, dry_run: bool) -> None:
         w_id = worklog["id"]
-        issue = self.jira.get_issue(worklog["issueId"])
+        issue = self.jira.get_issue(worklog["issueId"], self._issue_fields)
         issue_key = issue["key"]
         project = issue["fields"]["project"]
         project_key = project["key"].upper()
@@ -138,7 +164,10 @@ class SyncEngine:
             result.skipped += 1
             return
 
-        project_id = self._ensure_project(project_key, project["name"], result, dry_run)
+        if project_key in self._routing_projects:
+            project_id = self._resolve_department_project(issue, issue_key, result)
+        else:
+            project_id = self._ensure_project(project_key, project["name"], result, dry_run)
         if project_id is None:
             result.skipped += 1
             return
@@ -278,6 +307,46 @@ class SyncEngine:
                     )
 
         self._project_cache[key] = project_id
+        return project_id
+
+    def _resolve_department_project(
+        self, issue: dict, issue_key: str, result: SyncResult
+    ) -> int | None:
+        """Nos projetos com roteamento por departamento, o projeto Odoo vem do
+        valor do campo da issue (ex.: 'Departamento Dexterity'), nunca da key.
+        Nada é criado automaticamente: o projeto Odoo precisa existir."""
+        if self._dept_field_id is None:
+            return None  # aviso único já emitido no início da execução
+
+        dept = _field_text(issue["fields"].get(self._dept_field_id))
+        if not dept:
+            result.warn(
+                f"{issue_key}: campo '{self.cfg.department_field}' vazio no Jira; "
+                "preencha o departamento na issue — worklog pulado"
+            )
+            return None
+
+        odoo_name = self.cfg.department_map.get(dept.lower())
+        if not odoo_name:
+            if dept.lower() not in self._warned_departments:
+                self._warned_departments.add(dept.lower())
+                result.warn(
+                    f"departamento '{dept}' sem projeto Odoo no de-para "
+                    "(seção roteamento por departamento) — worklogs pulados"
+                )
+            return None
+
+        cache_key = f"dept::{odoo_name}"
+        if cache_key in self._project_cache:
+            return self._project_cache[cache_key]
+        rows = self._search_active_first("project.project", [("name", "=", odoo_name)], ["name"])
+        project_id = rows[0]["id"] if rows else None
+        if project_id is None:
+            result.warn(
+                f"departamento '{dept}' aponta para o projeto '{odoo_name}', mas ele "
+                "não existe no Odoo (nem arquivado); worklogs serão pulados"
+            )
+        self._project_cache[cache_key] = project_id
         return project_id
 
     def _ensure_task(self, project_id: int, issue_key: str, summary: str, dry_run: bool) -> int:

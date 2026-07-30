@@ -58,10 +58,25 @@ class FakeOdoo:
 
 
 class FakeJira:
-    def __init__(self, worklogs: list[dict], issues: dict[str, dict], deleted: list[int] = ()):
+    def __init__(
+        self,
+        worklogs: list[dict],
+        issues: dict[str, dict],
+        deleted: list[int] = (),
+        fields: dict[str, str] | None = None,
+    ):
         self.worklogs = {str(w["id"]): w for w in worklogs}
         self.issues = issues
         self.deleted = list(deleted)
+        # nome visível do campo -> id (ex.: {"Departamento Dexterity": "customfield_10052"})
+        self.fields = fields or {}
+
+    def find_field_id(self, name):
+        target = str(name).strip().lower()
+        for field_name, field_id in self.fields.items():
+            if field_name.strip().lower() == target:
+                return field_id
+        return None
 
     def updated_worklog_ids(self, since_ms):
         return [int(w_id) for w_id in self.worklogs]
@@ -108,11 +123,10 @@ def make_worklog(
 
 
 def make_issue(key="CDV-331", summary="Reunião de preparação", project_key="CDV",
-               project_name="Greenfield | Casa dos Ventos"):
-    return {
-        "key": key,
-        "fields": {
-            "summary": summary,
-            "project": {"key": project_key, "name": project_name},
-        },
+               project_name="Greenfield | Casa dos Ventos", extra_fields=None):
+    fields = {
+        "summary": summary,
+        "project": {"key": project_key, "name": project_name},
     }
+    fields.update(extra_fields or {})
+    return {"key": key, "fields": fields}

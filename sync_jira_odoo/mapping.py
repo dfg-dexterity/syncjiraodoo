@@ -33,6 +33,12 @@ class Mapping:
     restrict_to_mapped_projects: bool = False
     projects: list[dict] = field(default_factory=list)
     users: list[dict] = field(default_factory=list)
+    # Roteamento por departamento: para os projetos Jira listados, o projeto
+    # Odoo é decidido por um campo da issue (ex.: "Departamento Dexterity"),
+    # não pela key. Formato:
+    #   {"field": "Departamento Dexterity", "projects": ["TAV", "TADM"],
+    #    "map": [{"departamento": "Financeiro", "odoo": "Adm | Financeiro"}]}
+    department_routing: dict = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> "Mapping":
@@ -43,6 +49,7 @@ class Mapping:
             restrict_to_mapped_projects=bool(data.get("restrict_to_mapped_projects", False)),
             projects=list(data.get("projects", [])),
             users=list(data.get("users", [])),
+            department_routing=dict(data.get("department_routing", {})),
         )
 
     def save(self, path: Path) -> None:
@@ -50,6 +57,7 @@ class Mapping:
             "restrict_to_mapped_projects": self.restrict_to_mapped_projects,
             "projects": self.projects,
             "users": self.users,
+            "department_routing": self.department_routing,
         }
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -74,6 +82,26 @@ class Mapping:
                 result[jira] = odoo
                 if "@" in jira:
                     result[jira.lower()] = odoo
+        return result
+
+    def department_field(self) -> str:
+        return str(self.department_routing.get("field", "")).strip()
+
+    def department_projects(self) -> list[str]:
+        return [
+            str(k).strip().upper()
+            for k in self.department_routing.get("projects", [])
+            if str(k).strip()
+        ]
+
+    def department_map(self) -> dict[str, str]:
+        """Achata as linhas em {valor do campo (minúsculo): projeto Odoo}."""
+        result: dict[str, str] = {}
+        for row in self.department_routing.get("map", []):
+            dept = str(row.get("departamento", "")).strip()
+            odoo = str(row.get("odoo", "")).strip()
+            if dept and odoo:
+                result[dept.lower()] = odoo
         return result
 
     def validate(self) -> list[str]:
@@ -104,4 +132,31 @@ class Mapping:
             if jira.lower() in seen_users:
                 errors.append(f"usuários: '{jira}' aparece em mais de uma linha")
             seen_users.add(jira.lower())
+
+        routing = self.department_routing
+        if routing:
+            rows = list(routing.get("map", []))
+            if self.department_projects() or rows:
+                if not self.department_field():
+                    errors.append(
+                        "roteamento por departamento: informe o nome do campo no Jira"
+                    )
+                if not self.department_projects():
+                    errors.append(
+                        "roteamento por departamento: informe as keys dos projetos Jira"
+                    )
+            seen_depts: set[str] = set()
+            for i, row in enumerate(rows, start=1):
+                dept = str(row.get("departamento", "")).strip()
+                odoo = str(row.get("odoo", "")).strip()
+                if not dept or not odoo:
+                    errors.append(
+                        f"roteamento por departamento, linha {i}: preencha os dois lados"
+                    )
+                    continue
+                if dept.lower() in seen_depts:
+                    errors.append(
+                        f"roteamento por departamento: '{dept}' aparece em mais de uma linha"
+                    )
+                seen_depts.add(dept.lower())
         return errors

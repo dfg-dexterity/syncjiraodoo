@@ -1,0 +1,42 @@
+# Publica o Sincronizador de Horas na internet com HTTPS automático.
+#
+# Uso (num servidor com Docker e um domínio apontando para ele):
+#   1. echo "APP_DOMAIN=horas.suaempresa.com.br" > .env.compose
+#   2. docker compose --env-file .env.compose up -d --build
+#   3. abra https://horas.suaempresa.com.br — o certificado é emitido sozinho.
+#
+# O que persiste fica no volume sjo_data (.env do app, usuários, mapping,
+# estado incremental e logs) — sobrevive a rebuilds e reinícios.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - sjo_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/auth-state', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - "APP_DOMAIN=${APP_DOMAIN:?defina APP_DOMAIN no arquivo .env.compose}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+volumes:
+  sjo_data:
+  caddy_data:
+  caddy_config:

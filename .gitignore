@@ -2,6 +2,9 @@
 .env
 .sync_state.json
 .sync_history.json
+.sync_import_log.jsonl
+.sync_run.log*
+.users.json
 
 # Python
 __pycache__/
