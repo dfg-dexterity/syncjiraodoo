@@ -21,6 +21,13 @@ A mesma tela edita o de-para de projetos/pessoas e mostra a atividade:
 resumo de cada execução, cada apontamento importado no Odoo (com filtro) e o
 log técnico.
 
+**Conferência Jira × Odoo:** a seção compara item a item o que está no Jira
+com o que foi gravado no Odoo (data, horas, descrição), sem alterar nada —
+cada item sai como ✓ ok, ≠ divergente (mostrando o que difere), faltando ou
+duplicado. Os problemáticos podem ser marcados e **reimportados com um
+clique** (regrava a partir do Jira; aparece como "reimportação" no
+histórico e no log de importados, que registra também o id do worklog).
+
 **🐞 Reportar problema:** o botão no topo abre um formulário (título +
 descrição) que registra o relato como **issue no GitHub** do projeto, com o
 e-mail de quem reportou e o resumo da última execução anexados. Requer

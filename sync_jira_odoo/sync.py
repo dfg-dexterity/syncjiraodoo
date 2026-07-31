@@ -108,15 +108,7 @@ class SyncEngine:
         result = SyncResult()
         since_ms = int(since.timestamp() * 1000)
 
-        if self._routing_projects:
-            self._dept_field_id = self.jira.find_field_id(self.cfg.department_field)
-            if self._dept_field_id:
-                self._issue_fields = ("summary", "project", self._dept_field_id)
-            else:
-                result.warn(
-                    f"campo '{self.cfg.department_field}' não encontrado no Jira; "
-                    f"worklogs de {', '.join(sorted(self._routing_projects))} serão pulados"
-                )
+        self._prepare_department_field(result)
 
         ids = self.jira.updated_worklog_ids(since_ms)
         log.info("worklogs alterados desde %s: %d", since.isoformat(), len(ids))
@@ -145,6 +137,92 @@ class SyncEngine:
                     len(deleted_ids),
                 )
         return result
+
+    def _prepare_department_field(self, result: SyncResult) -> None:
+        if not self._routing_projects:
+            return
+        self._dept_field_id = self.jira.find_field_id(self.cfg.department_field)
+        if self._dept_field_id:
+            self._issue_fields = ("summary", "project", self._dept_field_id)
+        else:
+            result.warn(
+                f"campo '{self.cfg.department_field}' não encontrado no Jira; "
+                f"worklogs de {', '.join(sorted(self._routing_projects))} serão pulados"
+            )
+
+    def resync(self, worklog_ids: list, dry_run: bool = False) -> SyncResult:
+        """Reimporta worklogs específicos (pela lista de ids), regravando o
+        timesheet correspondente no Odoo a partir do que está no Jira hoje.
+        Não mexe no estado incremental."""
+        result = SyncResult()
+        self._prepare_department_field(result)
+        ids = [int(i) for i in worklog_ids]
+        log.info("reimportando %d worklog(s): %s", len(ids), ids)
+        for worklog in self.jira.get_worklogs(ids):
+            try:
+                self._sync_worklog(worklog, result, dry_run)
+            except OdooError as exc:
+                result.warn(f"worklog {worklog.get('id')} pulado por erro do Odoo: {exc}")
+                result.skipped += 1
+        return result
+
+    def audit(self, since: datetime) -> list[dict]:
+        """Compara, item a item, os worklogs do Jira com os timesheets do
+        Odoo — sem alterar nada. Devolve um registro por worklog com a
+        situação: ok, divergente (e o que difere), faltando ou duplicado."""
+        items: list[dict] = []
+        ids = self.jira.updated_worklog_ids(int(since.timestamp() * 1000))
+        log.info("conferência: comparando %d worklog(s) do Jira com o Odoo", len(ids))
+        for worklog in self.jira.get_worklogs(ids):
+            issue = self.jira.get_issue(worklog["issueId"])
+            project_key = issue["fields"]["project"]["key"].upper()
+            if self.cfg.jira_project_keys and project_key not in self.cfg.jira_project_keys:
+                continue
+            w_id = worklog["id"]
+            started = parse_started(worklog["started"])
+            comment = adf_to_text(worklog.get("comment")).strip()
+            description = comment or issue["fields"].get("summary", "") or issue["key"]
+            expected = {
+                "date": started.date().isoformat(),
+                "unit_amount": round(worklog["timeSpentSeconds"] / 3600, 2),
+                "name": f"{description} {worklog_marker(w_id)}",
+            }
+            item = {
+                "worklog": w_id,
+                "issue": issue["key"],
+                "autor": worklog["author"].get("displayName", ""),
+                "data_jira": expected["date"],
+                "horas_jira": expected["unit_amount"],
+                "descricao_jira": description[:120],
+            }
+            lines = self.odoo.search_read(
+                "account.analytic.line",
+                [("name", "like", worklog_marker(w_id))],
+                ["name", "date", "unit_amount"],
+                limit=2,
+            )
+            if not lines:
+                item.update(status="faltando", diferencas=[])
+            elif len(lines) > 1:
+                item.update(status="duplicado", diferencas=[])
+            else:
+                line = lines[0]
+                diffs = []
+                if str(line["date"]) != expected["date"]:
+                    diffs.append("data")
+                if line["unit_amount"] != expected["unit_amount"]:
+                    diffs.append("horas")
+                if str(line["name"]) != expected["name"]:
+                    diffs.append("descricao")
+                item.update(
+                    status="divergente" if diffs else "ok",
+                    diferencas=diffs,
+                    data_odoo=str(line["date"]),
+                    horas_odoo=line["unit_amount"],
+                    descricao_odoo=str(line["name"])[:120],
+                )
+            items.append(item)
+        return items
 
     # ------------------------------------------------------------- worklogs
 
@@ -209,6 +287,7 @@ class SyncEngine:
             result.created += 1
             result.items.append({
                 "acao": "criado",
+                "worklog": w_id,
                 "issue": issue_key,
                 "data": vals["date"],
                 "horas": vals["unit_amount"],
@@ -230,6 +309,7 @@ class SyncEngine:
             result.updated += 1
             result.items.append({
                 "acao": "atualizado",
+                "worklog": w_id,
                 "issue": issue_key,
                 "data": vals["date"],
                 "horas": vals["unit_amount"],
