@@ -266,3 +266,29 @@ class WebTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuditEndpointsTest(WebTest):
+    def test_audit_requires_since(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/audit", {"since": ""})
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_audit_get_returns_empty_initially(self):
+        status, data = self._request("/api/audit")
+        self.assertEqual(status, 200)
+        self.assertIsNone(data["audit"])
+        self.assertFalse(data["running"])
+
+    def test_reimport_validates_ids(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/reimport", {"worklogs": []})
+        self.assertEqual(ctx.exception.code, 400)
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/reimport", {"worklogs": ["abc"]})
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_audit_requires_login(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/audit", cookie=None)
+        self.assertEqual(ctx.exception.code, 401)

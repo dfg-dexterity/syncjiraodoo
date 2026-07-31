@@ -77,19 +77,104 @@ class SyncRunner:
         self.env_path = env_path or Path(DEFAULT_ENV_FILE)
         self.lock = threading.Lock()
         self.running = False
+        # resultado da última conferência Jira × Odoo (memória do processo)
+        self.audit: dict | None = None
         self.log_buffer: collections.deque[str] = collections.deque(maxlen=400)
         log.addHandler(_BufferHandler(self.log_buffer))
 
-    def start(self, dry_run: bool, since: str | None, delete: bool) -> bool:
+    def _acquire(self) -> bool:
         with self.lock:
             if self.running:
                 return False
             self.running = True
         self.log_buffer.clear()
+        return True
+
+    def _release(self) -> None:
+        with self.lock:
+            self.running = False
+
+    def _build_engine(self) -> SyncEngine:
+        cfg = Config.from_env()
+        mapping = Mapping.load(self.mapping_path)
+        errors = mapping.validate()
+        if errors:
+            raise ConfigError("mapping inválido: " + "; ".join(errors))
+        cfg.apply_mapping(mapping)
+        odoo = OdooClient(cfg.odoo_url, cfg.odoo_db, cfg.odoo_user, cfg.odoo_api_key)
+        jira = JiraClient(cfg.jira_url, cfg.jira_user, cfg.jira_api_token)
+        return SyncEngine(jira, odoo, cfg)
+
+    def start(self, dry_run: bool, since: str | None, delete: bool) -> bool:
+        if not self._acquire():
+            return False
         threading.Thread(
             target=self._execute, args=(dry_run, since, delete), daemon=True
         ).start()
         return True
+
+    def start_audit(self, since_str: str) -> bool:
+        if not self._acquire():
+            return False
+        threading.Thread(target=self._execute_audit, args=(since_str,), daemon=True).start()
+        return True
+
+    def start_reimport(self, worklog_ids: list) -> bool:
+        if not self._acquire():
+            return False
+        threading.Thread(
+            target=self._execute_reimport, args=(worklog_ids,), daemon=True
+        ).start()
+        return True
+
+    def _execute_audit(self, since_str: str) -> None:
+        audit: dict = {"since": since_str, "finished_utc": None, "items": [], "error": None}
+        try:
+            engine = self._build_engine()
+            since = storage.load_since(since_str, self.state_path)
+            audit["since"] = since.isoformat()
+            audit["items"] = engine.audit(since)
+            counts = collections.Counter(item["status"] for item in audit["items"])
+            log.info(
+                "conferência concluída: %d ok, %d divergentes, %d faltando, %d duplicados",
+                counts.get("ok", 0),
+                counts.get("divergente", 0),
+                counts.get("faltando", 0),
+                counts.get("duplicado", 0),
+            )
+        except Exception as exc:
+            log.error("conferência falhou: %s", exc)
+            audit["error"] = str(exc)
+        finally:
+            audit["finished_utc"] = datetime.now(timezone.utc).isoformat()
+            self.audit = audit
+            self._release()
+
+    def _execute_reimport(self, worklog_ids: list) -> None:
+        record: dict = {"finished_utc": None, "dry_run": False, "reimport": True, "ok": False}
+        try:
+            engine = self._build_engine()
+            result = engine.resync(worklog_ids)
+            log.info(
+                "reimportação: %d criados, %d atualizados, %d pulados, %d avisos",
+                result.created, result.updated, result.skipped, len(result.warnings),
+            )
+            record.update(
+                created=result.created,
+                updated=result.updated,
+                skipped=result.skipped,
+                deleted=0,
+                warnings=result.warnings,
+                ok=True,
+            )
+            storage.append_import_items(self.import_log_path, result.items)
+        except Exception as exc:
+            log.error("reimportação falhou: %s", exc)
+            record["error"] = str(exc)
+        finally:
+            record["finished_utc"] = datetime.now(timezone.utc).isoformat()
+            storage.append_history(self.history_path, record)
+            self._release()
 
     def _execute(self, dry_run: bool, since_str: str | None, delete: bool) -> None:
         record: dict = {
@@ -99,18 +184,10 @@ class SyncRunner:
             "ok": False,
         }
         try:
-            cfg = Config.from_env()
-            mapping = Mapping.load(self.mapping_path)
-            errors = mapping.validate()
-            if errors:
-                raise ConfigError("mapping inválido: " + "; ".join(errors))
-            cfg.apply_mapping(mapping)
-
+            engine = self._build_engine()
             since = storage.load_since(since_str or None, self.state_path)
             run_started = datetime.now(timezone.utc)
-            odoo = OdooClient(cfg.odoo_url, cfg.odoo_db, cfg.odoo_user, cfg.odoo_api_key)
-            jira = JiraClient(cfg.jira_url, cfg.jira_user, cfg.jira_api_token)
-            result = SyncEngine(jira, odoo, cfg).run(since, dry_run=dry_run, delete=delete)
+            result = engine.run(since, dry_run=dry_run, delete=delete)
 
             log.info(
                 "fim: %d criados, %d atualizados, %d pulados, %d removidos, %d avisos%s",
@@ -220,6 +297,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if user is None:
             self._send_json({"error": "faça login para continuar"}, status=401)
+            return
+        if self.path == "/api/audit":
+            self._send_json({"running": runner.running, "audit": runner.audit})
             return
         if self.path == "/api/users":
             if not user["admin"]:
@@ -334,6 +414,32 @@ class Handler(BaseHTTPRequestHandler):
             self._set_session_cookie("saiu", expire=True)
             self.end_headers()
             self.wfile.write(body)
+            return
+        if self.path == "/api/audit":
+            data = self._read_json()
+            since = str(data.get("since", "")).strip()
+            if not since:
+                self._send_json({"ok": False, "error": "informe a data inicial"}, 400)
+                return
+            if not runner.start_audit(since):
+                self._send_json({"ok": False, "error": "já existe uma execução em andamento"}, 409)
+                return
+            self._send_json({"ok": True})
+            return
+        if self.path == "/api/reimport":
+            data = self._read_json()
+            worklogs = [str(w).strip() for w in data.get("worklogs", []) if str(w).strip()]
+            if not worklogs:
+                self._send_json({"ok": False, "error": "selecione ao menos um item"}, 400)
+                return
+            if not all(w.isdigit() for w in worklogs):
+                self._send_json({"ok": False, "error": "ids de worklog inválidos"}, 400)
+                return
+            if not runner.start_reimport(worklogs):
+                self._send_json({"ok": False, "error": "já existe uma execução em andamento"}, 409)
+                return
+            log.info("reimportação solicitada por %s: %s", user["email"], worklogs)
+            self._send_json({"ok": True})
             return
         if self.path == "/api/bug":
             data = self._read_json()
@@ -838,6 +944,37 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </section>
 
+<!-- ============ CONFERÊNCIA ============ -->
+<section class="card">
+  <h2>Conferência Jira × Odoo</h2>
+  <p class="sub">Compara item a item o que está no Jira com o que foi gravado no Odoo
+  (data, horas, descrição) — <b>sem alterar nada</b>. O que estiver diferente ou
+  faltando pode ser reimportado com um clique.</p>
+  <div class="actions">
+    <label style="font-size:.86rem">conferir desde: <input type="date" id="auditSince"></label>
+    <button id="btnAudit">🔍 Conferir</button>
+    <span id="auditMsg" style="font-size:.85rem"></span>
+  </div>
+  <div class="summary" id="auditStats" style="display:none; margin-top:.9rem">
+    <div class="stat"><b id="auOk">–</b><span>✓ iguais</span></div>
+    <div class="stat"><b id="auDiff">–</b><span>≠ divergentes</span></div>
+    <div class="stat"><b id="auMissing">–</b><span>faltando no Odoo</span></div>
+  </div>
+  <div class="table-wrap" id="auditWrap" style="display:none">
+  <table id="auditTable">
+    <thead><tr><th style="width:2rem"><input type="checkbox" id="auAll" title="marcar todos os não-ok"></th>
+    <th>Issue</th><th>Pessoa</th><th>Data</th><th>Horas (Jira)</th><th>Horas (Odoo)</th>
+    <th>Situação</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  </div>
+  <div class="actions" id="auditActions" style="display:none; margin-top:.8rem">
+    <button id="btnReimport">↻ Reimportar selecionados</button>
+    <label style="font-size:.82rem"><input type="checkbox" id="auOnlyProblems" checked> mostrar só divergentes/faltando</label>
+    <span id="reimportMsg" style="font-size:.85rem"></span>
+  </div>
+</section>
+
 <!-- ============ ATIVIDADE ============ -->
 <section class="card">
   <h2>Atividade</h2>
@@ -1065,7 +1202,7 @@ function renderHistory(history) {
   for (const run of history) {
     const tr = el("tr");
     tr.appendChild(el("td", {}, run.finished_utc ? new Date(run.finished_utc).toLocaleString() : "—"));
-    tr.appendChild(el("td", {}, run.dry_run ? "simulação" : "real"));
+    tr.appendChild(el("td", {}, run.reimport ? "reimportação" : run.dry_run ? "simulação" : "real"));
     tr.appendChild(el("td", {}, run.since ? new Date(run.since).toLocaleDateString() : "—"));
     for (const field of ["created", "updated", "skipped", "deleted"])
       tr.appendChild(el("td", {}, String(run[field] ?? "—")));
@@ -1101,6 +1238,102 @@ function renderHistory(history) {
     warnBox.style.display = "none";
   }
 }
+
+/* ---------- conferência Jira × Odoo ---------- */
+let auditWatch = false;
+let reimportPending = null;
+let auditItems = [];
+
+function statusLabel(item) {
+  if (item.status === "ok") return "✓ ok";
+  if (item.status === "reimportado") return "↻ reimportado";
+  if (item.status === "faltando") return "falta no Odoo";
+  if (item.status === "duplicado") return "duplicado no Odoo";
+  return "≠ " + (item.diferencas || []).join(", ");
+}
+
+function renderAudit(data) {
+  const audit = data.audit;
+  const msg = document.getElementById("auditMsg");
+  if (!audit) return;
+  if (audit.error) { show("auditMsg", audit.error, "err-text"); return; }
+  auditItems = audit.items || [];
+  const counts = { ok: 0, divergente: 0, faltando: 0, duplicado: 0 };
+  for (const item of auditItems) counts[item.status] = (counts[item.status] || 0) + 1;
+  document.getElementById("auditStats").style.display = "";
+  document.getElementById("auOk").textContent = counts.ok;
+  document.getElementById("auDiff").textContent = counts.divergente + counts.duplicado;
+  document.getElementById("auMissing").textContent = counts.faltando;
+  show("auditMsg", auditItems.length + " itens conferidos (desde " +
+    new Date(audit.since).toLocaleDateString() + ")", "ok-text");
+  document.getElementById("auditWrap").style.display = "";
+  document.getElementById("auditActions").style.display = "";
+  renderAuditRows();
+}
+
+function renderAuditRows() {
+  const onlyProblems = document.getElementById("auOnlyProblems").checked;
+  const body = document.querySelector("#auditTable tbody");
+  body.innerHTML = "";
+  for (const item of auditItems) {
+    if (onlyProblems && item.status === "ok") continue;
+    const tr = el("tr");
+    const tdSel = el("td");
+    if (item.status !== "ok" && item.status !== "duplicado" && item.status !== "reimportado") {
+      tdSel.appendChild(el("input", { type: "checkbox", className: "auSel", value: String(item.worklog) }));
+    }
+    tr.appendChild(tdSel);
+    tr.appendChild(el("td", {}, item.issue || "—"));
+    tr.appendChild(el("td", {}, item.autor || "—"));
+    tr.appendChild(el("td", {}, item.data_jira || "—"));
+    tr.appendChild(el("td", {}, String(item.horas_jira ?? "—")));
+    tr.appendChild(el("td", {}, item.horas_odoo != null ? String(item.horas_odoo) : "—"));
+    const st = el("td", {}, statusLabel(item));
+    st.className = (item.status === "ok" || item.status === "reimportado") ? "ok-text"
+      : item.status === "divergente" ? "warn-text" : "err-text";
+    tr.appendChild(st);
+    body.appendChild(tr);
+  }
+}
+
+async function loadAudit() {
+  try {
+    const data = await (await fetch("/api/audit")).json();
+    if (!data.running) renderAudit(data);
+    return data;
+  } catch (e) { return null; }
+}
+
+document.getElementById("btnAudit").addEventListener("click", async () => {
+  const since = document.getElementById("auditSince").value;
+  if (!since) { show("auditMsg", "escolha a data inicial", "err-text"); return; }
+  const res = await fetch("/api/audit", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ since }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data.ok) { auditWatch = true; show("auditMsg", "conferindo… (períodos longos podem demorar)", ""); }
+  else show("auditMsg", data.error || "não foi possível iniciar", "err-text");
+});
+
+document.getElementById("auOnlyProblems").addEventListener("change", renderAuditRows);
+document.getElementById("auAll").addEventListener("change", event => {
+  for (const box of document.querySelectorAll(".auSel")) box.checked = event.target.checked;
+});
+
+document.getElementById("btnReimport").addEventListener("click", async () => {
+  const ids = [...document.querySelectorAll(".auSel:checked")].map(b => b.value);
+  if (!ids.length) { show("reimportMsg", "marque os itens que quer reimportar", "err-text"); return; }
+  const res = await fetch("/api/reimport", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ worklogs: ids }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data.ok) {
+    reimportPending = ids;
+    show("reimportMsg", "reimportando " + ids.length + " item(ns)…", "");
+  } else show("reimportMsg", data.error || "não foi possível reimportar", "err-text");
+});
 
 /* ---------- apontamentos importados ---------- */
 async function loadImportLog() {
@@ -1207,7 +1440,18 @@ async function refresh() {
     if (!mappingLoaded) { renderMapping(state.mapping); mappingLoaded = true; }
     renderHistory(state.history);
     document.getElementById("log").textContent = state.log.join("\n");
-    if (wasRunning && !state.running) loadImportLog();
+    if (wasRunning && !state.running) {
+      loadImportLog();
+      if (auditWatch) { auditWatch = false; loadAudit(); }
+      if (reimportPending) {
+        // marca os itens reimportados na tabela; o botão Conferir confirma no Odoo
+        for (const item of auditItems)
+          if (reimportPending.includes(String(item.worklog))) item.status = "reimportado";
+        reimportPending = null;
+        renderAuditRows();
+        show("reimportMsg", "reimportação concluída — clique em 🔍 Conferir para confirmar", "ok-text");
+      }
+    }
     wasRunning = state.running;
   } catch (e) { /* servidor reiniciando */ }
 }
@@ -1260,6 +1504,7 @@ document.getElementById("implogFilter").addEventListener("input", renderImportLo
 
 loadConfig();
 loadImportLog();
+loadAudit();
 refresh();
 setInterval(refresh, 2500);
 </script>

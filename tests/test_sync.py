@@ -336,3 +336,55 @@ class DepartmentRoutingTest(unittest.TestCase):
         )
         result = engine.run(SINCE)
         self.assertEqual(result.created, 1)
+
+
+class AuditAndResyncTest(unittest.TestCase):
+    """Conferência Jira × Odoo (audit) e reimportação seletiva (resync)."""
+
+    def setUp(self):
+        self.odoo = make_odoo_with_employee()
+        self.jira = FakeJira([make_worklog()], {"35772": make_issue()})
+        self.engine = SyncEngine(self.jira, self.odoo, make_config())
+
+    def test_audit_reports_ok_after_sync(self):
+        self.engine.run(SINCE)
+        items = SyncEngine(self.jira, self.odoo, make_config()).audit(SINCE)
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertEqual(item["status"], "ok")
+        self.assertEqual(item["issue"], "CDV-331")
+        self.assertEqual(item["data_jira"], "2026-06-08")
+        self.assertEqual(item["horas_jira"], 0.33)
+        self.assertEqual(item["horas_odoo"], 0.33)
+
+    def test_audit_detects_divergence_and_missing(self):
+        self.engine.run(SINCE)
+        # alguém mexeu no Odoo: horas diferentes do Jira
+        self.odoo.data["account.analytic.line"][0]["unit_amount"] = 8.0
+        items = SyncEngine(self.jira, self.odoo, make_config()).audit(SINCE)
+        self.assertEqual(items[0]["status"], "divergente")
+        self.assertEqual(items[0]["diferencas"], ["horas"])
+        # linha removida do Odoo → faltando
+        self.odoo.data["account.analytic.line"] = []
+        items = SyncEngine(self.jira, self.odoo, make_config()).audit(SINCE)
+        self.assertEqual(items[0]["status"], "faltando")
+
+    def test_audit_writes_nothing(self):
+        self.engine.audit(SINCE)
+        self.assertNotIn("account.analytic.line", self.odoo.data)
+        self.assertNotIn("project.project", self.odoo.data)
+
+    def test_resync_fixes_divergent_line(self):
+        self.engine.run(SINCE)
+        self.odoo.data["account.analytic.line"][0]["unit_amount"] = 8.0
+        result = SyncEngine(self.jira, self.odoo, make_config()).resync(["27279"])
+        self.assertEqual(result.updated, 1)
+        self.assertEqual(self.odoo.data["account.analytic.line"][0]["unit_amount"], 0.33)
+        self.assertEqual(result.items[0]["worklog"], "27279")
+
+    def test_resync_recreates_missing_line(self):
+        self.engine.run(SINCE)
+        self.odoo.data["account.analytic.line"] = []
+        result = SyncEngine(self.jira, self.odoo, make_config()).resync([27279])
+        self.assertEqual(result.created, 1)
+        self.assertEqual(len(self.odoo.data["account.analytic.line"]), 1)
