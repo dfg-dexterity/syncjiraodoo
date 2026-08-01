@@ -33,6 +33,14 @@ from .jira_client import JiraClient
 from .logsetup import DEFAULT_RUN_LOG_FILE, configure_logging
 from .mapping import Mapping
 from .odoo_client import OdooClient
+from .scheduler import (
+    DEFAULT_SCHEDULE_FILE,
+    Scheduler,
+    load_schedule,
+    next_due,
+    save_schedule,
+    validate_schedule,
+)
 from .sync import SyncEngine, connection_report
 
 # variáveis gerenciadas pela tela de configuração; as marcadas são segredos
@@ -75,6 +83,7 @@ class SyncRunner:
         self.history_path = history_path
         self.import_log_path = import_log_path or Path(storage.DEFAULT_IMPORT_LOG_FILE)
         self.env_path = env_path or Path(DEFAULT_ENV_FILE)
+        self.schedule_path = Path(DEFAULT_SCHEDULE_FILE)
         self.lock = threading.Lock()
         self.running = False
         # resultado da última conferência Jira × Odoo (memória do processo)
@@ -105,11 +114,13 @@ class SyncRunner:
         jira = JiraClient(cfg.jira_url, cfg.jira_user, cfg.jira_api_token)
         return SyncEngine(jira, odoo, cfg)
 
-    def start(self, dry_run: bool, since: str | None, delete: bool) -> bool:
+    def start(
+        self, dry_run: bool, since: str | None, delete: bool, scheduled: bool = False
+    ) -> bool:
         if not self._acquire():
             return False
         threading.Thread(
-            target=self._execute, args=(dry_run, since, delete), daemon=True
+            target=self._execute, args=(dry_run, since, delete, scheduled), daemon=True
         ).start()
         return True
 
@@ -176,11 +187,14 @@ class SyncRunner:
             storage.append_history(self.history_path, record)
             self._release()
 
-    def _execute(self, dry_run: bool, since_str: str | None, delete: bool) -> None:
+    def _execute(
+        self, dry_run: bool, since_str: str | None, delete: bool, scheduled: bool = False
+    ) -> None:
         record: dict = {
             "finished_utc": None,
             "dry_run": dry_run,
             "delete": delete,
+            "scheduled": scheduled,
             "ok": False,
         }
         try:
@@ -298,6 +312,12 @@ class Handler(BaseHTTPRequestHandler):
         if user is None:
             self._send_json({"error": "faça login para continuar"}, status=401)
             return
+        if self.path == "/api/schedule":
+            schedule = load_schedule(runner.schedule_path)
+            due = next_due(schedule, datetime.now(timezone.utc))
+            schedule.pop("last_started_utc", None)
+            self._send_json({"schedule": schedule, "next_utc": due.isoformat() if due else None})
+            return
         if self.path == "/api/audit":
             self._send_json({"running": runner.running, "audit": runner.audit})
             return
@@ -414,6 +434,21 @@ class Handler(BaseHTTPRequestHandler):
             self._set_session_cookie("saiu", expire=True)
             self.end_headers()
             self.wfile.write(body)
+            return
+        if self.path == "/api/schedule":
+            data = self._read_json()
+            schedule, error = validate_schedule(data)
+            if schedule is None:
+                self._send_json({"ok": False, "error": error}, 400)
+                return
+            # preserva o último disparo para não duplicar execuções
+            previous = load_schedule(runner.schedule_path)
+            if previous.get("last_started_utc"):
+                schedule["last_started_utc"] = previous["last_started_utc"]
+            save_schedule(runner.schedule_path, schedule)
+            log.info("agenda de sincronização alterada por %s: %s", user["email"], schedule)
+            due = next_due(schedule, datetime.now(timezone.utc))
+            self._send_json({"ok": True, "next_utc": due.isoformat() if due else None})
             return
         if self.path == "/api/audit":
             data = self._read_json()
@@ -823,6 +858,24 @@ INDEX_HTML = r"""<!doctype html>
       <label><input type="checkbox" id="propDelete"> apagar no Odoo os apontamentos excluídos no Jira</label>
     </div>
   </details>
+
+  <h3 style="font-size:.92rem; margin:1.2rem 0 .3rem">⏰ Sincronização automática</h3>
+  <p class="sub" style="margin-bottom:.5rem">O aplicativo roda a sincronização sozinho na frequência
+  que você escolher (traz só o que mudou; nunca em paralelo com uma execução manual).</p>
+  <div class="actions">
+    <select id="schedMode" style="font:inherit; font-size:.86rem; padding:.4rem .6rem; border:1px solid var(--line-strong); border-radius:8px">
+      <option value="off">desligada</option>
+      <option value="30">a cada 30 minutos</option>
+      <option value="60">a cada 1 hora</option>
+      <option value="240">a cada 4 horas</option>
+      <option value="daily">uma vez por dia às…</option>
+    </select>
+    <input type="time" id="schedTime" value="06:00" style="display:none; font:inherit; font-size:.86rem; padding:.35rem .6rem; border:1px solid var(--line-strong); border-radius:8px">
+    <span class="muted" id="schedTimeHint" style="display:none">(horário de Brasília)</span>
+    <button class="mini" id="btnSchedSave">salvar agenda</button>
+    <span id="schedMsg" style="font-size:.85rem"></span>
+  </div>
+  <p id="schedNext" class="muted" style="font-size:.82rem; margin:.4rem 0 0"></p>
 </section>
 
 <!-- ============ CONEXÕES ============ -->
@@ -1202,7 +1255,8 @@ function renderHistory(history) {
   for (const run of history) {
     const tr = el("tr");
     tr.appendChild(el("td", {}, run.finished_utc ? new Date(run.finished_utc).toLocaleString() : "—"));
-    tr.appendChild(el("td", {}, run.reimport ? "reimportação" : run.dry_run ? "simulação" : "real"));
+    tr.appendChild(el("td", {}, run.reimport ? "reimportação"
+      : run.scheduled ? "automática" : run.dry_run ? "simulação" : "real"));
     tr.appendChild(el("td", {}, run.since ? new Date(run.since).toLocaleDateString() : "—"));
     for (const field of ["created", "updated", "skipped", "deleted"])
       tr.appendChild(el("td", {}, String(run[field] ?? "—")));
@@ -1238,6 +1292,50 @@ function renderHistory(history) {
     warnBox.style.display = "none";
   }
 }
+
+/* ---------- sincronização automática ---------- */
+function renderScheduleNext(nextUtc) {
+  const line = document.getElementById("schedNext");
+  line.textContent = nextUtc
+    ? "próxima execução automática: " + new Date(nextUtc).toLocaleString()
+    : "sincronização automática desligada — rode manualmente quando quiser";
+}
+function applyScheduleForm(schedule) {
+  const mode = !schedule.enabled ? "off"
+    : schedule.daily_time ? "daily" : String(schedule.interval_minutes || 60);
+  const select = document.getElementById("schedMode");
+  if ([...select.options].some(o => o.value === mode)) select.value = mode;
+  if (schedule.daily_time) document.getElementById("schedTime").value = schedule.daily_time;
+  toggleScheduleTime();
+}
+function toggleScheduleTime() {
+  const daily = document.getElementById("schedMode").value === "daily";
+  document.getElementById("schedTime").style.display = daily ? "" : "none";
+  document.getElementById("schedTimeHint").style.display = daily ? "" : "none";
+}
+async function loadSchedule() {
+  try {
+    const data = await (await fetch("/api/schedule")).json();
+    applyScheduleForm(data.schedule || {});
+    renderScheduleNext(data.next_utc);
+  } catch (e) { /* servidor ocupado */ }
+}
+document.getElementById("schedMode").addEventListener("change", toggleScheduleTime);
+document.getElementById("btnSchedSave").addEventListener("click", async () => {
+  const mode = document.getElementById("schedMode").value;
+  const body = { enabled: mode !== "off", interval_minutes: 0, daily_time: "" };
+  if (mode === "daily") body.daily_time = document.getElementById("schedTime").value;
+  else if (mode !== "off") body.interval_minutes = parseInt(mode, 10);
+  const res = await fetch("/api/schedule", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data.ok) {
+    show("schedMsg", "agenda salva ✓", "ok-text");
+    renderScheduleNext(data.next_utc);
+  } else show("schedMsg", data.error || "não foi possível salvar", "err-text");
+});
 
 /* ---------- conferência Jira × Odoo ---------- */
 let auditWatch = false;
@@ -1505,6 +1603,7 @@ document.getElementById("implogFilter").addEventListener("input", renderImportLo
 loadConfig();
 loadImportLog();
 loadAudit();
+loadSchedule();
 refresh();
 setInterval(refresh, 2500);
 </script>
@@ -1527,6 +1626,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-file", default=DEFAULT_RUN_LOG_FILE)
     parser.add_argument("--env-file", default=DEFAULT_ENV_FILE)
     parser.add_argument("--users-file", default=auth.DEFAULT_USERS_FILE)
+    parser.add_argument("--schedule-file", default=DEFAULT_SCHEDULE_FILE)
     parser.add_argument(
         "--add-user",
         metavar="EMAIL",
@@ -1558,6 +1658,8 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.import_log_file),
         Path(args.env_file),
     )
+    runner.schedule_path = Path(args.schedule_file)
+    Scheduler(runner, runner.schedule_path).start()
     server = App((args.host, args.port), runner, Path(args.users_file))
     url = f"http://{args.host}:{server.server_address[1]}/"
     print(f"Aplicativo disponível em {url}")

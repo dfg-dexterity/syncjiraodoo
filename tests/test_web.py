@@ -37,6 +37,7 @@ class WebTest(unittest.TestCase):
             self.import_log_path,
             self.env_path,
         )
+        self.runner.schedule_path = base / "schedule.json"
         self.server = App(("127.0.0.1", 0), self.runner, self.users_path)
         self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -291,4 +292,33 @@ class AuditEndpointsTest(WebTest):
     def test_audit_requires_login(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self._request("/api/audit", cookie=None)
+        self.assertEqual(ctx.exception.code, 401)
+
+
+class ScheduleEndpointsTest(WebTest):
+    def test_schedule_default_disabled(self):
+        status, data = self._request("/api/schedule")
+        self.assertEqual(status, 200)
+        self.assertFalse(data["schedule"]["enabled"])
+        self.assertIsNone(data["next_utc"])
+
+    def test_schedule_roundtrip(self):
+        status, data = self._request(
+            "/api/schedule", {"enabled": True, "interval_minutes": 60}
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertIsNotNone(data["next_utc"])
+        status, data = self._request("/api/schedule")
+        self.assertTrue(data["schedule"]["enabled"])
+        self.assertEqual(data["schedule"]["interval_minutes"], 60)
+
+    def test_schedule_rejects_invalid(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/schedule", {"enabled": True})
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_schedule_requires_login(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/schedule", cookie=None)
         self.assertEqual(ctx.exception.code, 401)

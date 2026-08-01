@@ -21,6 +21,14 @@ A mesma tela edita o de-para de projetos/pessoas e mostra a atividade:
 resumo de cada execução, cada apontamento importado no Odoo (com filtro) e o
 log técnico.
 
+**⏰ Sincronização automática:** dentro da seção Sincronizar, escolha a
+frequência — a cada 30 min / 1 h / 4 h, ou uma vez por dia em um horário
+(de Brasília) — e salve. O próprio aplicativo dispara a sincronização
+incremental sozinho (agendador interno; nada de cron), mostra a próxima
+execução prevista e registra cada rodada no histórico como "automática".
+A agenda fica em `.sync_schedule.json` (fora do git) e sobrevive a
+reinícios sem duplicar execuções.
+
 **Conferência Jira × Odoo:** a seção compara item a item o que está no Jira
 com o que foi gravado no Odoo (data, horas, descrição), sem alterar nada —
 cada item sai como ✓ ok, ≠ divergente (mostrando o que difere), faltando ou
