@@ -79,8 +79,11 @@ class FakeRunner:
         self.running = False
         self.calls = []
 
-    def start(self, dry_run, since, delete, scheduled=False):
-        self.calls.append({"dry_run": dry_run, "since": since, "scheduled": scheduled})
+    def start(self, dry_run, since, delete, scheduled=False, close_tasks=False):
+        self.calls.append({
+            "dry_run": dry_run, "since": since,
+            "scheduled": scheduled, "close_tasks": close_tasks,
+        })
         return True
 
 
@@ -92,8 +95,10 @@ class SchedulerTickTest(unittest.TestCase):
             runner = FakeRunner()
             scheduler = Scheduler(runner, path)
             self.assertTrue(scheduler.tick(NOW))
-            self.assertEqual(runner.calls[0],
-                             {"dry_run": False, "since": None, "scheduled": True})
+            self.assertEqual(runner.calls[0], {
+                "dry_run": False, "since": None,
+                "scheduled": True, "close_tasks": False,
+            })
             # o disparo ficou registrado: o tick seguinte não duplica
             self.assertFalse(scheduler.tick(NOW + timedelta(minutes=5)))
             self.assertTrue(scheduler.tick(NOW + timedelta(minutes=31)))

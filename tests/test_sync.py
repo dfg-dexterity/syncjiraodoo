@@ -388,3 +388,111 @@ class AuditAndResyncTest(unittest.TestCase):
         result = SyncEngine(self.jira, self.odoo, make_config()).resync([27279])
         self.assertEqual(result.created, 1)
         self.assertEqual(len(self.odoo.data["account.analytic.line"]), 1)
+
+
+class CloseDoneTasksTest(unittest.TestCase):
+    """Issues concluídas no Jira → tarefas concluídas no Odoo."""
+
+    def make_engine(self, statuses, tasks):
+        self.odoo = make_odoo_with_employee()
+        self.odoo.data["project.task"] = tasks
+        self.jira = FakeJira([], {}, statuses=statuses)
+        return SyncEngine(self.jira, self.odoo, make_config())
+
+    def task(self, tid, name, state="01_in_progress"):
+        return {"id": tid, "name": name, "state": state}
+
+    def test_closes_tasks_whose_issues_are_done(self):
+        engine = self.make_engine(
+            {"CDV-331": True, "CDV-400": False},
+            [self.task(1, "[CDV-331] Reunião"), self.task(2, "[CDV-400] Em aberto")],
+        )
+        result = engine.close_done_tasks()
+        self.assertEqual(result.updated, 1)
+        self.assertEqual(result.warnings, [])
+        states = {t["id"]: t["state"] for t in self.odoo.data["project.task"]}
+        self.assertEqual(states[1], "1_done")
+        self.assertEqual(states[2], "01_in_progress")
+        self.assertEqual(result.items[0]["acao"], "tarefa concluída")
+        self.assertEqual(result.items[0]["issue"], "CDV-331")
+
+    def test_already_done_and_manual_tasks_untouched(self):
+        engine = self.make_engine(
+            {"CDV-331": True},
+            [
+                self.task(1, "[CDV-331] Já fechada", state="1_done"),
+                self.task(2, "Tarefa manual sem marcador"),
+            ],
+        )
+        result = engine.close_done_tasks()
+        self.assertEqual(result.updated, 0)
+        self.assertEqual(self.odoo.data["project.task"][1]["state"], "01_in_progress")
+
+    def test_missing_issue_warns_and_skips(self):
+        engine = self.make_engine({}, [self.task(1, "[CDV-999] Issue apagada")])
+        result = engine.close_done_tasks()
+        self.assertEqual(result.updated, 0)
+        self.assertIn("não existe mais", " ".join(result.warnings))
+
+    def test_dry_run_changes_nothing(self):
+        engine = self.make_engine({"CDV-331": True}, [self.task(1, "[CDV-331] Reunião")])
+        result = engine.close_done_tasks(dry_run=True)
+        self.assertEqual(result.updated, 1)
+        self.assertEqual(self.odoo.data["project.task"][0]["state"], "01_in_progress")
+
+
+class DepartmentConcatTest(unittest.TestCase):
+    """Planilha ITPR: projeto Odoo = "Projeto Jira | Departamento Dexterity"."""
+
+    FIELD_ID = "customfield_10052"
+
+    def make_engine(self, dept_value, odoo_projects=None, department_map=None):
+        issue = make_issue(
+            key="TAD-965",
+            summary="Integrar apontamentos",
+            project_key="TAD",
+            project_name="ITPR | Tarefas Avulsas",
+            extra_fields={self.FIELD_ID: dept_value},
+        )
+        self.odoo = make_odoo_with_employee()
+        if odoo_projects:
+            self.odoo.data["project.project"] = odoo_projects
+        self.jira = FakeJira(
+            [make_worklog(issue_id="901")],
+            {"901": issue},
+            fields={"Departamento Dexterity": self.FIELD_ID},
+        )
+        cfg = make_config(
+            department_field="Departamento Dexterity",
+            department_projects=["TAD", "RDF"],
+            department_map=department_map or {},
+            department_concat=True,
+        )
+        return SyncEngine(self.jira, self.odoo, cfg)
+
+    def test_concatenates_project_name_and_department(self):
+        engine = self.make_engine(
+            {"value": "FI - Financeiro"},
+            odoo_projects=[{"id": 77, "name": "ITPR | Tarefas Avulsas | FI - Financeiro"}],
+        )
+        result = engine.run(SINCE)
+        self.assertEqual(result.created, 1)
+        self.assertEqual(result.warnings, [])
+        self.assertEqual(self.odoo.data["account.analytic.line"][0]["project_id"], 77)
+
+    def test_explicit_map_row_overrides_concat(self):
+        engine = self.make_engine(
+            {"value": "TI - Tecnologia"},
+            odoo_projects=[{"id": 88, "name": "Projeto Especial de TI"}],
+            department_map={"ti - tecnologia": "Projeto Especial de TI"},
+        )
+        result = engine.run(SINCE)
+        self.assertEqual(result.created, 1)
+        self.assertEqual(self.odoo.data["account.analytic.line"][0]["project_id"], 88)
+
+    def test_concat_target_missing_in_odoo_warns(self):
+        engine = self.make_engine({"value": "RH - Pessoas & Cultura"})
+        result = engine.run(SINCE)
+        self.assertEqual((result.created, result.skipped), (0, 1))
+        self.assertIn("ITPR | Tarefas Avulsas | RH - Pessoas & Cultura",
+                      " ".join(result.warnings))

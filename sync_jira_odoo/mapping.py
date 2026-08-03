@@ -94,6 +94,11 @@ class Mapping:
             if str(k).strip()
         ]
 
+    def department_concat(self) -> bool:
+        """Com true, o projeto Odoo é montado automaticamente como
+        "<nome do projeto Jira> | <valor do campo>" (a tabela vira exceção)."""
+        return bool(self.department_routing.get("concat"))
+
     def department_map(self) -> dict[str, str]:
         """Achata as linhas em {valor do campo (minúsculo): projeto Odoo}."""
         result: dict[str, str] = {}

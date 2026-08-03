@@ -29,6 +29,9 @@ class FakeOdoo:
             elif op == "like":
                 if str(value) not in str(actual):
                     return False
+            elif op == "not in":
+                if actual in value:
+                    return False
             else:
                 raise NotImplementedError(f"operador não suportado no fake: {op}")
         return True
@@ -64,12 +67,21 @@ class FakeJira:
         issues: dict[str, dict],
         deleted: list[int] = (),
         fields: dict[str, str] | None = None,
+        statuses: dict[str, bool] | None = None,
     ):
         self.worklogs = {str(w["id"]): w for w in worklogs}
         self.issues = issues
         self.deleted = list(deleted)
         # nome visível do campo -> id (ex.: {"Departamento Dexterity": "customfield_10052"})
         self.fields = fields or {}
+        # key da issue -> True se concluída no Jira; ausente = issue não existe
+        self.statuses = statuses or {}
+
+    def get_issue_status(self, key):
+        if key not in self.statuses:
+            return None
+        done = bool(self.statuses[key])
+        return {"name": "Concluído" if done else "Em andamento", "done": done}
 
     def find_field_id(self, name):
         target = str(name).strip().lower()

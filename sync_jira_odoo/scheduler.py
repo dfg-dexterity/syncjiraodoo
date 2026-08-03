@@ -34,15 +34,16 @@ MIN_INTERVAL_MINUTES = 15
 def load_schedule(path: str | Path) -> dict:
     path = Path(path)
     if not path.exists():
-        return {"enabled": False, "interval_minutes": 0, "daily_time": ""}
+        return {"enabled": False, "interval_minutes": 0, "daily_time": "", "close_tasks": False}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"enabled": False, "interval_minutes": 0, "daily_time": ""}
+        return {"enabled": False, "interval_minutes": 0, "daily_time": "", "close_tasks": False}
     return {
         "enabled": bool(data.get("enabled")),
         "interval_minutes": int(data.get("interval_minutes") or 0),
         "daily_time": str(data.get("daily_time") or ""),
+        "close_tasks": bool(data.get("close_tasks")),
         "last_started_utc": data.get("last_started_utc"),
     }
 
@@ -71,7 +72,12 @@ def validate_schedule(data: dict) -> tuple[dict | None, str]:
                 raise ValueError
         except ValueError:
             return None, "horário inválido (use HH:MM)"
-    return {"enabled": enabled, "interval_minutes": interval, "daily_time": daily}, ""
+    return {
+        "enabled": enabled,
+        "interval_minutes": interval,
+        "daily_time": daily,
+        "close_tasks": bool(data.get("close_tasks")),
+    }, ""
 
 
 def _parse_last(schedule: dict) -> datetime | None:
@@ -148,7 +154,13 @@ class Scheduler(threading.Thread):
         schedule = load_schedule(self.path)
         if not is_due(schedule, now_utc) or self.runner.running:
             return False
-        if not self.runner.start(dry_run=False, since=None, delete=False, scheduled=True):
+        if not self.runner.start(
+            dry_run=False,
+            since=None,
+            delete=False,
+            scheduled=True,
+            close_tasks=bool(schedule.get("close_tasks")),
+        ):
             return False
         schedule["last_started_utc"] = now_utc.isoformat()
         save_schedule(self.path, schedule)
