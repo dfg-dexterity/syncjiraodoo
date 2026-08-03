@@ -308,12 +308,25 @@ class DepartmentRoutingTest(unittest.TestCase):
         names = [p["name"] for p in self.odoo.data["project.project"]]
         self.assertEqual(names, ["Administrativo | Financeiro"])
 
-    def test_empty_department_skips_with_warning(self):
+    def test_empty_department_is_an_error(self):
         engine = self.make_engine(None,
             odoo_projects=[{"id": 88, "name": "Administrativo | Financeiro"}])
         result = engine.run(SINCE)
         self.assertEqual((result.created, result.skipped), (0, 1))
-        self.assertIn("vazio", " ".join(result.warnings))
+        self.assertEqual(result.warnings, [])
+        self.assertEqual(len(result.errors), 1)
+        self.assertIn("ERRO TAV-12", result.errors[0])
+        self.assertIn("vazio", result.errors[0])
+
+    def test_empty_department_error_reported_once_per_issue(self):
+        engine = self.make_engine(None,
+            odoo_projects=[{"id": 88, "name": "Administrativo | Financeiro"}])
+        # dois worklogs na mesma issue sem departamento
+        segundo = make_worklog(wid="27300", issue_id="900")
+        engine.jira.worklogs["27300"] = segundo
+        result = engine.run(SINCE)
+        self.assertEqual(result.skipped, 2)
+        self.assertEqual(len(result.errors), 1)
 
     def test_unmapped_department_skips_with_warning(self):
         engine = self.make_engine({"value": "Comercial"},

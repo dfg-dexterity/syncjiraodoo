@@ -77,12 +77,19 @@ class SyncResult:
     skipped: int = 0
     deleted: int = 0
     warnings: list[str] = field(default_factory=list)
+    # problemas que exigem ação de alguém (ex.: campo obrigatório vazio na
+    # issue) — exibidos em vermelho na interface, separados dos avisos
+    errors: list[str] = field(default_factory=list)
     # um registro por timesheet criado/atualizado/removido, para auditoria
     items: list[dict] = field(default_factory=list)
 
     def warn(self, message: str) -> None:
         self.warnings.append(message)
         log.warning(message)
+
+    def error(self, message: str) -> None:
+        self.errors.append(message)
+        log.error(message)
 
 
 class SyncEngine:
@@ -97,6 +104,7 @@ class SyncEngine:
         self._dept_field_id: str | None = None
         self._issue_fields: tuple[str, ...] = ("summary", "project")
         self._warned_departments: set[str] = set()
+        self._error_issues: set[str] = set()
 
     # ------------------------------------------------------------------ run
 
@@ -454,10 +462,14 @@ class SyncEngine:
 
         dept = _field_text(issue["fields"].get(self._dept_field_id))
         if not dept:
-            result.warn(
-                f"{issue_key}: campo '{self.cfg.department_field}' vazio no Jira; "
-                "preencha o departamento na issue — worklog pulado"
-            )
+            if issue_key not in self._error_issues:
+                self._error_issues.add(issue_key)
+                result.error(
+                    f"ERRO {issue_key}: o campo '{self.cfg.department_field}' está "
+                    "vazio no Jira — preencha o Departamento Dexterity na issue. "
+                    "Os apontamentos dela foram pulados e entrarão na próxima "
+                    "sincronização após a correção."
+                )
             return None
 
         odoo_name = self.cfg.department_map.get(dept.lower())
