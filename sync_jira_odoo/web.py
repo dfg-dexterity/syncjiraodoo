@@ -779,6 +779,22 @@ INDEX_HTML = r"""<!doctype html>
   .pill.warn { color: var(--warn); background: var(--warn-bg); }
   .pill.err { color: var(--err); background: var(--err-bg); }
 
+  .tabs {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--surface); border-bottom: 1px solid var(--line);
+  }
+  .tabs-inner {
+    max-width: 1080px; margin: 0 auto; padding: .45rem 1.25rem;
+    display: flex; gap: .35rem; flex-wrap: wrap;
+  }
+  .tab {
+    font-size: .88rem; font-weight: 600; border: none; background: none;
+    color: var(--muted); padding: .45rem .85rem; border-radius: 9px; cursor: pointer;
+  }
+  .tab:hover { background: var(--surface-2); color: var(--ink); }
+  .tab.active { background: var(--ink); color: var(--bg); }
+  section[data-page] { display: none; }
+
   .card {
     background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
     padding: 1.1rem 1.25rem; margin-top: 1.25rem; box-shadow: var(--shadow);
@@ -868,6 +884,14 @@ INDEX_HTML = r"""<!doctype html>
   <span id="status" class="pill ok">…</span>
 </div></div>
 
+<nav class="tabs"><div class="tabs-inner">
+  <button class="tab" data-page="sync">▶ Sincronizar</button>
+  <button class="tab" data-page="audit">🔍 Conferência</button>
+  <button class="tab" data-page="mapping">🗺️ De-para</button>
+  <button class="tab" data-page="activity">📋 Atividade</button>
+  <button class="tab" data-page="settings">⚙️ Configurações</button>
+</div></nav>
+
 <main>
 
 <!-- ============ REPORTAR BUG ============ -->
@@ -888,7 +912,7 @@ INDEX_HTML = r"""<!doctype html>
 </section>
 
 <!-- ============ SINCRONIZAR ============ -->
-<section class="card">
+<section class="card" data-page="sync">
   <h2>Sincronizar</h2>
   <p class="sub">Traz para o Odoo tudo que mudou no Jira desde a última execução. Rodar duas vezes não duplica nada.</p>
   <div class="summary" id="statCards" style="display:none">
@@ -934,7 +958,7 @@ INDEX_HTML = r"""<!doctype html>
 </section>
 
 <!-- ============ CONEXÕES ============ -->
-<section class="card">
+<section class="card" data-page="settings">
   <h2>Conexões <span id="cfgState" class="pill warn" style="display:none">configure para começar</span></h2>
   <p class="sub">Preencha uma vez; fica salvo com segurança neste computador (arquivo .env, fora do controle de versão).</p>
   <details id="cfgDetails">
@@ -977,7 +1001,7 @@ INDEX_HTML = r"""<!doctype html>
 </section>
 
 <!-- ============ DE-PARA ============ -->
-<section class="card">
+<section class="card" data-page="mapping">
   <h2>De-para de projetos <span class="muted">— qual projeto do Jira vira qual projeto do Odoo</span></h2>
   <p class="sub">Vários projetos do Jira podem apontar para o mesmo projeto do Odoo. O nome do Odoo precisa ser exatamente igual ao cadastrado lá.</p>
   <div class="table-wrap">
@@ -1038,7 +1062,7 @@ INDEX_HTML = r"""<!doctype html>
 </section>
 
 <!-- ============ EQUIPE ============ -->
-<section class="card" id="teamCard" style="display:none">
+<section class="card" id="teamCard" data-page="settings">
   <h2>Equipe</h2>
   <p class="sub">Quem pode entrar neste aplicativo. Somente administradores veem esta seção.</p>
   <div class="table-wrap">
@@ -1059,7 +1083,7 @@ INDEX_HTML = r"""<!doctype html>
 </section>
 
 <!-- ============ CONFERÊNCIA ============ -->
-<section class="card">
+<section class="card" data-page="audit">
   <h2>Conferência Jira × Odoo</h2>
   <p class="sub">Compara item a item o que está no Jira com o que foi gravado no Odoo
   (data, horas, descrição) — <b>sem alterar nada</b>. O que estiver diferente ou
@@ -1090,7 +1114,7 @@ INDEX_HTML = r"""<!doctype html>
 </section>
 
 <!-- ============ ATIVIDADE ============ -->
-<section class="card">
+<section class="card" data-page="activity">
   <h2>Atividade</h2>
   <p class="sub">Tudo fica registrado: o resumo de cada execução e cada apontamento que entrou no Odoo.</p>
 
@@ -1130,6 +1154,31 @@ INDEX_HTML = r"""<!doctype html>
 let mappingLoaded = false;
 let wasRunning = false;
 let importLog = [];
+let currentPage = "sync";
+
+/* ---------- navegação por abas ---------- */
+const PAGES = ["sync", "audit", "mapping", "activity", "settings"];
+
+function renderPages() {
+  for (const section of document.querySelectorAll("section[data-page]")) {
+    let visible = section.dataset.page === currentPage;
+    if (section.id === "teamCard" && !(me && me.admin)) visible = false;
+    section.style.display = visible ? "block" : "none";
+  }
+  for (const tab of document.querySelectorAll(".tab"))
+    tab.classList.toggle("active", tab.dataset.page === currentPage);
+}
+
+function showPage(name) {
+  if (!PAGES.includes(name)) name = "sync";
+  currentPage = name;
+  history.replaceState(null, "", "#" + name);
+  renderPages();
+  window.scrollTo({ top: 0 });
+}
+
+document.querySelectorAll(".tab").forEach(tab =>
+  tab.addEventListener("click", () => showPage(tab.dataset.page)));
 
 function el(tag, attrs = {}, text = "") {
   const node = document.createElement(tag);
@@ -1163,11 +1212,15 @@ async function loadConfig() {
   }
   applyConfigured(data.configured);
 }
+let onboardingShown = false;
 function applyConfigured(configured) {
   document.getElementById("cfgState").style.display = configured ? "none" : "";
   document.getElementById("btnSync").disabled = !configured;
   document.getElementById("btnDry").disabled = !configured;
-  if (!configured) document.getElementById("cfgDetails").open = true;
+  if (!configured) {
+    document.getElementById("cfgDetails").open = true;
+    if (!onboardingShown) { onboardingShown = true; showPage("settings"); }
+  }
 }
 async function saveConfig() {
   const body = {};
@@ -1584,8 +1637,7 @@ function applyUser(user) {
   me = user || null;
   document.getElementById("whoami").textContent = me ? me.email : "";
   document.getElementById("btnLogout").style.display = me ? "" : "none";
-  const card = document.getElementById("teamCard");
-  card.style.display = me && me.admin ? "" : "none";
+  renderPages();
   if (me && me.admin && !teamLoaded) { teamLoaded = true; loadTeam(); }
 }
 
@@ -1676,6 +1728,7 @@ document.getElementById("btnTest").addEventListener("click", testConnection);
 document.getElementById("btnSaveMapping").addEventListener("click", saveMapping);
 document.getElementById("implogFilter").addEventListener("input", renderImportLog);
 
+showPage(location.hash.replace("#", "") || "sync");
 loadConfig();
 loadImportLog();
 loadAudit();
