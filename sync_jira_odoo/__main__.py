@@ -127,12 +127,13 @@ def main(argv: list[str] | None = None) -> int:
         result = engine.run(since, dry_run=args.dry_run, delete=args.delete)
 
         log.info(
-            "fim: %d criados, %d atualizados, %d pulados, %d removidos, %d avisos%s",
+            "fim: %d criados, %d atualizados, %d pulados, %d removidos, %d avisos, %d erros%s",
             result.created,
             result.updated,
             result.skipped,
             result.deleted,
             len(result.warnings),
+            len(result.errors),
             " (dry-run, nada gravado)" if args.dry_run else "",
         )
         storage.append_history(
@@ -147,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
                 "skipped": result.skipped,
                 "deleted": result.deleted,
                 "warnings": result.warnings,
+                "errors": result.errors,
                 "ok": True,
             },
         )

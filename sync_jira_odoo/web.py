@@ -211,6 +211,7 @@ class SyncRunner:
                 skipped=result.skipped,
                 deleted=0,
                 warnings=result.warnings,
+                errors=result.errors,
                 ok=True,
             )
             storage.append_import_items(self.import_log_path, result.items)
@@ -246,15 +247,17 @@ class SyncRunner:
                 close_result = engine.close_done_tasks(dry_run=dry_run)
                 record["tasks_closed"] = close_result.updated
                 result.warnings.extend(close_result.warnings)
+                result.errors.extend(close_result.errors)
                 result.items.extend(close_result.items)
 
             log.info(
-                "fim: %d criados, %d atualizados, %d pulados, %d removidos, %d avisos%s",
+                "fim: %d criados, %d atualizados, %d pulados, %d removidos, %d avisos, %d erros%s",
                 result.created,
                 result.updated,
                 result.skipped,
                 result.deleted,
                 len(result.warnings),
+                len(result.errors),
                 " (dry-run, nada gravado)" if dry_run else "",
             )
             record.update(
@@ -264,6 +267,7 @@ class SyncRunner:
                 skipped=result.skipped,
                 deleted=result.deleted,
                 warnings=result.warnings,
+                errors=result.errors,
                 ok=True,
             )
             if not dry_run:
@@ -833,6 +837,11 @@ INDEX_HTML = r"""<!doctype html>
     display: none; margin-top: .9rem; padding: .7rem .95rem; border-radius: 10px;
     background: var(--warn-bg); color: var(--warn); font-size: .84rem; white-space: pre-wrap;
   }
+  #errBox {
+    display: none; margin-top: .9rem; padding: .7rem .95rem; border-radius: 10px;
+    background: var(--err-bg); color: var(--err); font-size: .84rem; white-space: pre-wrap;
+    border: 1px solid var(--err); font-weight: 500;
+  }
 
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
   @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
@@ -919,6 +928,7 @@ INDEX_HTML = r"""<!doctype html>
     <div class="stat"><b id="stCreated">–</b><span>importados</span></div>
     <div class="stat"><b id="stUpdated">–</b><span>atualizados</span></div>
     <div class="stat"><b id="stWarnings">–</b><span>avisos</span></div>
+    <div class="stat"><b id="stErrors" class="err-text">–</b><span>erros</span></div>
   </div>
   <p id="lastRunLine">nenhuma execução registrada ainda</p>
   <div class="actions">
@@ -927,6 +937,7 @@ INDEX_HTML = r"""<!doctype html>
     <button id="btnCloseTasks" title="marca como concluídas no Odoo as tarefas cujas issues já foram finalizadas no Jira">✅ Concluir tarefas</button>
     <span id="msg"></span>
   </div>
+  <div id="errBox"></div>
   <div id="warnBox"></div>
   <details class="adv">
     <summary>Opções avançadas</summary>
@@ -1379,8 +1390,10 @@ function renderHistory(history) {
     for (const field of ["created", "updated", "skipped", "deleted"])
       tr.appendChild(el("td", {}, String(run[field] ?? "—")));
     tr.appendChild(el("td", {}, String((run.warnings || []).length)));
-    const result = el("td", {}, run.ok ? "✓ ok" : "✕ " + (run.error || "erro"));
-    result.className = run.ok ? "ok-text" : "err-text";
+    const runErrors = (run.errors || []).length;
+    const result = el("td", {}, !run.ok ? "✕ " + (run.error || "erro")
+      : runErrors ? "⚠ ok com " + runErrors + " erro(s)" : "✓ ok");
+    result.className = !run.ok ? "err-text" : runErrors ? "warn-text" : "ok-text";
     tr.appendChild(result);
     body.appendChild(tr);
   }
@@ -1388,11 +1401,20 @@ function renderHistory(history) {
   const line = document.getElementById("lastRunLine");
   const cards = document.getElementById("statCards");
   const warnBox = document.getElementById("warnBox");
-  if (!last) { warnBox.style.display = "none"; return; }
+  const errBox = document.getElementById("errBox");
+  if (!last) { warnBox.style.display = "none"; errBox.style.display = "none"; return; }
   cards.style.display = "";
   document.getElementById("stCreated").textContent = last.created ?? "–";
   document.getElementById("stUpdated").textContent = last.updated ?? "–";
   document.getElementById("stWarnings").textContent = (last.warnings || []).length;
+  document.getElementById("stErrors").textContent = (last.errors || []).length;
+  const errs = last.errors || [];
+  if (errs.length) {
+    errBox.style.display = "";
+    errBox.textContent = "🚫 Erros que precisam de ação:\n• " + errs.join("\n• ");
+  } else {
+    errBox.style.display = "none";
+  }
   const quando = last.finished_utc ? new Date(last.finished_utc).toLocaleString() : "";
   if (last.ok) {
     line.className = "";
