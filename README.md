@@ -29,6 +29,13 @@ execução prevista e registra cada rodada no histórico como "automática".
 A agenda fica em `.sync_schedule.json` (fora do git) e sobrevive a
 reinícios sem duplicar execuções.
 
+**✅ Concluir tarefas:** o botão marca como concluídas no Odoo (state
+`1_done`) as tarefas cujas issues já foram finalizadas no Jira
+(statusCategory *done*). Só toca tarefas criadas pelo sync (marcador
+`[KEY-N]`) e ainda abertas; tarefas manuais nunca são alteradas. Também
+disponível como opção nas Opções avançadas da sincronização e na agenda
+automática ("concluir tarefas também").
+
 **Conferência Jira × Odoo:** a seção compara item a item o que está no Jira
 com o que foi gravado no Odoo (data, horas, descrição), sem alterar nada —
 cada item sai como ✓ ok, ≠ divergente (mostrando o que difere), faltando ou
@@ -166,8 +173,11 @@ A forma recomendada de configurar os mapeamentos é o arquivo **`mapping.json`**
 - **`department_routing`** — roteamento por departamento: nos projetos Jira
   listados (ex.: Tarefas Avulsas/Administrativas), o projeto Odoo é decidido
   pelo valor de um campo da issue (ex.: "Departamento Dexterity"), não pela
-  key. `{"field": "Departamento Dexterity", "projects": ["TAV", "TADM"],
-  "map": [{"departamento": "Financeiro", "odoo": "Administrativo | Financeiro"}]}`.
+  key. `{"field": "Departamento Dexterity", "projects": ["TAD", "RDF"],
+  "concat": true, "map": []}`. Com `concat`, o projeto Odoo é montado
+  automaticamente como `"<nome do projeto Jira> | <departamento>"`
+  (ex.: `ITPR | Tarefas Avulsas | FI - Financeiro`); linhas em `map`
+  funcionam como exceções e têm precedência.
   Issues com o campo vazio ou valor sem de-para geram aviso e são puladas
   (nada se perde: corrija e rode de novo com `--since` retroativo). O projeto
   Odoo de destino precisa existir — nunca é criado automaticamente.

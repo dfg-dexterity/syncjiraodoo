@@ -115,14 +115,49 @@ class SyncRunner:
         return SyncEngine(jira, odoo, cfg)
 
     def start(
-        self, dry_run: bool, since: str | None, delete: bool, scheduled: bool = False
+        self,
+        dry_run: bool,
+        since: str | None,
+        delete: bool,
+        scheduled: bool = False,
+        close_tasks: bool = False,
     ) -> bool:
         if not self._acquire():
             return False
         threading.Thread(
-            target=self._execute, args=(dry_run, since, delete, scheduled), daemon=True
+            target=self._execute,
+            args=(dry_run, since, delete, scheduled, close_tasks),
+            daemon=True,
         ).start()
         return True
+
+    def start_close_tasks(self) -> bool:
+        if not self._acquire():
+            return False
+        threading.Thread(target=self._execute_close, daemon=True).start()
+        return True
+
+    def _execute_close(self) -> None:
+        record: dict = {"finished_utc": None, "dry_run": False, "close_only": True, "ok": False}
+        try:
+            engine = self._build_engine()
+            result = engine.close_done_tasks(dry_run=False)
+            record.update(
+                created=0,
+                updated=result.updated,
+                skipped=0,
+                deleted=0,
+                warnings=result.warnings,
+                ok=True,
+            )
+            storage.append_import_items(self.import_log_path, result.items)
+        except Exception as exc:
+            log.error("conclusão de tarefas falhou: %s", exc)
+            record["error"] = str(exc)
+        finally:
+            record["finished_utc"] = datetime.now(timezone.utc).isoformat()
+            storage.append_history(self.history_path, record)
+            self._release()
 
     def start_audit(self, since_str: str) -> bool:
         if not self._acquire():
@@ -188,7 +223,12 @@ class SyncRunner:
             self._release()
 
     def _execute(
-        self, dry_run: bool, since_str: str | None, delete: bool, scheduled: bool = False
+        self,
+        dry_run: bool,
+        since_str: str | None,
+        delete: bool,
+        scheduled: bool = False,
+        close_tasks: bool = False,
     ) -> None:
         record: dict = {
             "finished_utc": None,
@@ -202,6 +242,11 @@ class SyncRunner:
             since = storage.load_since(since_str or None, self.state_path)
             run_started = datetime.now(timezone.utc)
             result = engine.run(since, dry_run=dry_run, delete=delete)
+            if close_tasks:
+                close_result = engine.close_done_tasks(dry_run=dry_run)
+                record["tasks_closed"] = close_result.updated
+                result.warnings.extend(close_result.warnings)
+                result.items.extend(close_result.items)
 
             log.info(
                 "fim: %d criados, %d atualizados, %d pulados, %d removidos, %d avisos%s",
@@ -569,12 +614,19 @@ class Handler(BaseHTTPRequestHandler):
                 return
             mapping.save(runner.mapping_path)
             self._send_json({"ok": True})
+        elif self.path == "/api/close-tasks":
+            if runner.start_close_tasks():
+                log.info("conclusão de tarefas solicitada por %s", user["email"])
+                self._send_json({"ok": True})
+            else:
+                self._send_json({"ok": False, "error": "já existe uma execução em andamento"}, 409)
         elif self.path == "/api/sync":
             data = self._read_json()
             started = runner.start(
                 dry_run=bool(data.get("dry_run")),
                 since=data.get("since") or None,
                 delete=bool(data.get("delete")),
+                close_tasks=bool(data.get("close_tasks")),
             )
             if started:
                 self._send_json({"ok": True})
@@ -848,6 +900,7 @@ INDEX_HTML = r"""<!doctype html>
   <div class="actions">
     <button class="big" id="btnSync">▶ Sincronizar agora</button>
     <button class="big ghost" id="btnDry">Simular (não grava nada)</button>
+    <button id="btnCloseTasks" title="marca como concluídas no Odoo as tarefas cujas issues já foram finalizadas no Jira">✅ Concluir tarefas</button>
     <span id="msg"></span>
   </div>
   <div id="warnBox"></div>
@@ -856,6 +909,7 @@ INDEX_HTML = r"""<!doctype html>
     <div class="inner">
       <label>buscar desde: <input type="date" id="since"></label>
       <label><input type="checkbox" id="propDelete"> apagar no Odoo os apontamentos excluídos no Jira</label>
+      <label><input type="checkbox" id="closeTasks"> concluir no Odoo as tarefas finalizadas no Jira</label>
     </div>
   </details>
 
@@ -872,6 +926,7 @@ INDEX_HTML = r"""<!doctype html>
     </select>
     <input type="time" id="schedTime" value="06:00" style="display:none; font:inherit; font-size:.86rem; padding:.35rem .6rem; border:1px solid var(--line-strong); border-radius:8px">
     <span class="muted" id="schedTimeHint" style="display:none">(horário de Brasília)</span>
+    <label style="font-size:.82rem"><input type="checkbox" id="schedClose"> concluir tarefas também</label>
     <button class="mini" id="btnSchedSave">salvar agenda</button>
     <span id="schedMsg" style="font-size:.85rem"></span>
   </div>
@@ -957,9 +1012,15 @@ INDEX_HTML = r"""<!doctype html>
       <input type="text" id="deptField" placeholder="Departamento Dexterity"
              style="font:inherit; font-size:.85rem; padding:.35rem .6rem; border:1px solid var(--line-strong); border-radius:8px; min-width:220px"></label>
     <label style="font-size:.85rem">Projetos Jira com roteamento (keys):
-      <input type="text" id="deptProjects" placeholder="TAV, TADM"
+      <input type="text" id="deptProjects" placeholder="TAD, RDF"
              style="font:inherit; font-size:.85rem; padding:.35rem .6rem; border:1px solid var(--line-strong); border-radius:8px; min-width:160px"></label>
   </div>
+  <label style="font-size:.85rem; display:block; margin-bottom:.5rem">
+    <input type="checkbox" id="deptConcat">
+    montar o projeto Odoo automaticamente como <b>"Projeto Jira | Departamento"</b>
+    (ex.: <span class="muted">ITPR | Tarefas Avulsas | FI - Financeiro</span>) —
+    a tabela abaixo vira só exceções
+  </label>
   <div class="table-wrap">
   <table id="deptTable">
     <thead><tr><th>Departamento (valor exato no Jira)</th>
@@ -1194,6 +1255,7 @@ function renderMapping(mapping) {
   const routing = mapping.department_routing || {};
   document.getElementById("deptField").value = routing.field || "";
   document.getElementById("deptProjects").value = (routing.projects || []).join(", ");
+  document.getElementById("deptConcat").checked = !!routing.concat;
   const deptBody = document.querySelector("#deptTable tbody");
   deptBody.innerHTML = "";
   for (const row of routing.map || [])
@@ -1215,8 +1277,9 @@ function collectMapping() {
   const deptField = document.getElementById("deptField").value.trim();
   const deptProjects = document.getElementById("deptProjects").value
     .split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
-  const department_routing = (deptField || deptProjects.length || deptMap.length)
-    ? { field: deptField, projects: deptProjects, map: deptMap }
+  const deptConcat = document.getElementById("deptConcat").checked;
+  const department_routing = (deptField || deptProjects.length || deptMap.length || deptConcat)
+    ? { field: deptField, projects: deptProjects, map: deptMap, concat: deptConcat }
     : {};
   return {
     restrict_to_mapped_projects: document.getElementById("restrict").checked,
@@ -1241,6 +1304,7 @@ async function runSync(dryRun) {
       dry_run: dryRun,
       since: document.getElementById("since").value || null,
       delete: document.getElementById("propDelete").checked,
+      close_tasks: document.getElementById("closeTasks").checked,
     }),
   });
   const data = await res.json().catch(() => ({}));
@@ -1255,7 +1319,8 @@ function renderHistory(history) {
   for (const run of history) {
     const tr = el("tr");
     tr.appendChild(el("td", {}, run.finished_utc ? new Date(run.finished_utc).toLocaleString() : "—"));
-    tr.appendChild(el("td", {}, run.reimport ? "reimportação"
+    tr.appendChild(el("td", {}, run.close_only ? "conclusão de tarefas"
+      : run.reimport ? "reimportação"
       : run.scheduled ? "automática" : run.dry_run ? "simulação" : "real"));
     tr.appendChild(el("td", {}, run.since ? new Date(run.since).toLocaleDateString() : "—"));
     for (const field of ["created", "updated", "skipped", "deleted"])
@@ -1306,6 +1371,7 @@ function applyScheduleForm(schedule) {
   const select = document.getElementById("schedMode");
   if ([...select.options].some(o => o.value === mode)) select.value = mode;
   if (schedule.daily_time) document.getElementById("schedTime").value = schedule.daily_time;
+  document.getElementById("schedClose").checked = !!schedule.close_tasks;
   toggleScheduleTime();
 }
 function toggleScheduleTime() {
@@ -1323,7 +1389,10 @@ async function loadSchedule() {
 document.getElementById("schedMode").addEventListener("change", toggleScheduleTime);
 document.getElementById("btnSchedSave").addEventListener("click", async () => {
   const mode = document.getElementById("schedMode").value;
-  const body = { enabled: mode !== "off", interval_minutes: 0, daily_time: "" };
+  const body = {
+    enabled: mode !== "off", interval_minutes: 0, daily_time: "",
+    close_tasks: document.getElementById("schedClose").checked,
+  };
   if (mode === "daily") body.daily_time = document.getElementById("schedTime").value;
   else if (mode !== "off") body.interval_minutes = parseInt(mode, 10);
   const res = await fetch("/api/schedule", {
@@ -1595,6 +1664,13 @@ document.getElementById("btnLogout").addEventListener("click", async () => {
 document.getElementById("btnTeamAdd").addEventListener("click", addTeamMember);
 document.getElementById("btnSync").addEventListener("click", () => runSync(false));
 document.getElementById("btnDry").addEventListener("click", () => runSync(true));
+document.getElementById("btnCloseTasks").addEventListener("click", async () => {
+  const res = await fetch("/api/close-tasks", { method: "POST" });
+  const data = await res.json().catch(() => ({}));
+  show("msg", res.ok && data.ok
+    ? "concluindo tarefas finalizadas no Jira…"
+    : (data.error || "não foi possível iniciar"), res.ok ? "" : "warn-text");
+});
 document.getElementById("btnSaveCfg").addEventListener("click", saveConfig);
 document.getElementById("btnTest").addEventListener("click", testConnection);
 document.getElementById("btnSaveMapping").addEventListener("click", saveMapping);

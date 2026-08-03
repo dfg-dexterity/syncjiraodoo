@@ -170,7 +170,11 @@
   ],
   "department_routing": {
     "field": "Departamento Dexterity",
-    "projects": [],
+    "projects": [
+      "TAD",
+      "RDF"
+    ],
+    "concat": true,
     "map": []
   }
 }

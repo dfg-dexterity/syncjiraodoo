@@ -102,6 +102,21 @@ class JiraClient:
             worklogs.extend(self._request("POST", "/rest/api/3/worklog/list", body={"ids": chunk}))
         return worklogs
 
+    def get_issue_status(self, key: str) -> dict | None:
+        """Status atual de uma issue: {"name": ..., "done": bool}. Devolve
+        None se a issue não existe mais no Jira."""
+        try:
+            data = self._request(
+                "GET", f"/rest/api/3/issue/{key}", params={"fields": "status"}
+            )
+        except JiraError as exc:
+            if "HTTP 404" in str(exc):
+                return None
+            raise
+        status = (data.get("fields") or {}).get("status") or {}
+        category = (status.get("statusCategory") or {}).get("key", "")
+        return {"name": status.get("name", ""), "done": category == "done"}
+
     def get_issue(self, issue_id: str, fields: tuple[str, ...] = ("summary", "project")) -> dict:
         key = str(issue_id)
         if key not in self._issue_cache:

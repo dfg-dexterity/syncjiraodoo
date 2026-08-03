@@ -25,6 +25,7 @@ from .odoo_client import OdooClient, OdooError
 log = logging.getLogger("sync_jira_odoo")
 
 WORKLOG_MARKER_RE = re.compile(r"\[jira-worklog:(\d+)\]")
+ISSUE_KEY_RE = re.compile(r"\[([A-Z][A-Z0-9]*-\d+)\]")
 
 
 def worklog_marker(worklog_id: str | int) -> str:
@@ -224,6 +225,59 @@ class SyncEngine:
             items.append(item)
         return items
 
+    def close_done_tasks(self, dry_run: bool = False) -> SyncResult:
+        """Marca como concluídas no Odoo (state '1_done') as tarefas cujas
+        issues já foram finalizadas no Jira (statusCategory = done). Só toca
+        tarefas criadas pelo sync (com marcador [KEY-N]) e ainda abertas;
+        tarefas manuais do Odoo nunca são alteradas."""
+        result = SyncResult()
+        try:
+            tasks = self.odoo.search_read(
+                "project.task",
+                [("name", "like", "["), ("state", "not in", ["1_done", "1_canceled"])],
+                ["name", "state"],
+            )
+        except OdooError as exc:
+            result.warn(f"não foi possível listar as tarefas abertas no Odoo: {exc}")
+            return result
+        log.info("conclusão de tarefas: verificando %d tarefa(s) aberta(s)", len(tasks))
+        to_close: list[dict] = []
+        for task in tasks:
+            match = ISSUE_KEY_RE.search(str(task.get("name", "")))
+            if not match:
+                continue
+            key = match.group(1)
+            status = self.jira.get_issue_status(key)
+            if status is None:
+                result.warn(
+                    f"tarefa '{task['name']}': issue {key} não existe mais no Jira; ignorada"
+                )
+                continue
+            if status["done"]:
+                to_close.append(task)
+        if to_close and not dry_run:
+            try:
+                self.odoo.write(
+                    "project.task", [task["id"] for task in to_close], {"state": "1_done"}
+                )
+            except OdooError as exc:
+                result.warn(f"falha ao concluir tarefas no Odoo: {exc}")
+                return result
+        for task in to_close:
+            log.info("tarefa concluída no Odoo: %s", task["name"])
+            result.updated += 1
+            result.items.append({
+                "acao": "tarefa concluída",
+                "issue": ISSUE_KEY_RE.search(str(task["name"])).group(1),
+                "descricao": str(task["name"])[:120],
+            })
+        log.info(
+            "conclusão de tarefas: %d marcada(s) como concluída(s)%s",
+            result.updated,
+            " (dry-run, nada gravado)" if dry_run else "",
+        )
+        return result
+
     # ------------------------------------------------------------- worklogs
 
     def _sync_worklog(self, worklog: dict, result: SyncResult, dry_run: bool) -> None:
@@ -407,6 +461,10 @@ class SyncEngine:
             return None
 
         odoo_name = self.cfg.department_map.get(dept.lower())
+        if not odoo_name and self.cfg.department_concat:
+            # padrão da planilha: "ITPR | Tarefas Avulsas | FI - Financeiro"
+            project_name = str(issue["fields"]["project"].get("name", "")).strip()
+            odoo_name = f"{project_name} | {dept}"
         if not odoo_name:
             if dept.lower() not in self._warned_departments:
                 self._warned_departments.add(dept.lower())

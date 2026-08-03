@@ -60,6 +60,8 @@ class Config:
     department_field: str = ""
     department_projects: list[str] = field(default_factory=list)
     department_map: dict[str, str] = field(default_factory=dict)
+    # monta o nome do projeto Odoo como "<projeto Jira> | <departamento>"
+    department_concat: bool = False
 
     def apply_mapping(self, mapping) -> None:
         """Mescla uma tabela de-para (mapping.json); o arquivo tem precedência
@@ -69,6 +71,7 @@ class Config:
         self.department_field = mapping.department_field()
         self.department_projects = mapping.department_projects()
         self.department_map = mapping.department_map()
+        self.department_concat = mapping.department_concat()
         if mapping.restrict_to_mapped_projects and not self.jira_project_keys:
             self.jira_project_keys = sorted(
                 set(mapping.project_map()) | set(self.department_projects)

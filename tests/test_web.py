@@ -322,3 +322,15 @@ class ScheduleEndpointsTest(WebTest):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self._request("/api/schedule", cookie=None)
         self.assertEqual(ctx.exception.code, 401)
+
+
+class CloseTasksEndpointTest(WebTest):
+    def test_close_tasks_requires_login(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/close-tasks", {}, cookie=None)
+        self.assertEqual(ctx.exception.code, 401)
+
+    def test_close_tasks_starts_background_run(self):
+        status, data = self._request("/api/close-tasks", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
