@@ -710,7 +710,7 @@ fetch("/api/auth-state").then(r => r.json()).then(data => {
     document.getElementById("title").textContent = "Bem-vindo! Crie o primeiro acesso";
     document.getElementById("subtitle").textContent =
       "Este será o usuário administrador do Sincronizador de Horas.";
-    document.getElementById("confirmWrap").style.display = "";
+    document.getElementById("confirmWrap").style.display = "block";
     document.getElementById("btn").textContent = "Criar e entrar";
     // impede o navegador de sobrescrever o campo com senha gerada/salva
     const senhaInput = document.getElementById("senha");
@@ -1410,7 +1410,7 @@ function renderHistory(history) {
   document.getElementById("stErrors").textContent = (last.errors || []).length;
   const errs = last.errors || [];
   if (errs.length) {
-    errBox.style.display = "";
+    errBox.style.display = "block";
     errBox.textContent = "🚫 Erros que precisam de ação:\n• " + errs.join("\n• ");
   } else {
     errBox.style.display = "none";
@@ -1426,7 +1426,7 @@ function renderHistory(history) {
   }
   const warns = last.warnings || [];
   if (warns.length) {
-    warnBox.style.display = "";
+    warnBox.style.display = "block";
     warnBox.textContent = "Avisos:\n• " + warns.join("\n• ");
   } else {
     warnBox.style.display = "none";
