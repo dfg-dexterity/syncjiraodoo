@@ -334,3 +334,22 @@ class CloseTasksEndpointTest(WebTest):
         status, data = self._request("/api/close-tasks", {})
         self.assertEqual(status, 200)
         self.assertTrue(data["ok"])
+
+
+class CssHiddenElementsTest(unittest.TestCase):
+    """Elementos escondidos por regra CSS (display:none na folha de estilo)
+    não podem ser exibidos com style.display = "" — isso só apaga o estilo
+    inline e devolve o controle ao CSS, que os mantém ocultos. Regressão do
+    bug em que o contador dizia "1 aviso" mas a caixa nunca aparecia."""
+
+    CSS_HIDDEN = ("warnBox", "errBox", "confirmWrap")
+
+    def test_css_hidden_elements_are_shown_with_block(self):
+        from sync_jira_odoo.web import INDEX_HTML, LOGIN_HTML
+        html = INDEX_HTML + LOGIN_HTML
+        for element_id in self.CSS_HIDDEN:
+            self.assertIn(f"#{element_id} {{", html.replace("#" + element_id + " {", f"#{element_id} {{"))
+            self.assertNotIn(f'{element_id}.style.display = ""', html, element_id)
+            self.assertNotIn(
+                f'getElementById("{element_id}").style.display = ""', html, element_id
+            )
