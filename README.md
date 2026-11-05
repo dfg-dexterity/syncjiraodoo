@@ -36,6 +36,15 @@ reinícios sem duplicar execuções.
 disponível como opção nas Opções avançadas da sincronização e na agenda
 automática ("concluir tarefas também").
 
+**📅 Fechamento de período:** a aba compara as horas do **Clockwork Pro**
+com as do **Odoo** em um dia, semana ou mês — totais, por projeto e por
+pessoa — e lista nominalmente cada diferença: falta no Odoo, horas/data/
+projeto divergentes, duplicado, só no Odoo (worklog apagado/movido no
+Jira), lançado à mão no Odoo e sem destino (ex.: Departamento Dexterity
+vazio). Somente leitura; cada fechamento fica gravado em
+`.sync_closings.json` (fora do git) e pode ser revisto na própria aba.
+Refazer o mesmo período substitui o fechamento anterior.
+
 **Conferência Jira × Odoo:** a seção compara item a item o que está no Jira
 com o que foi gravado no Odoo (data, horas, descrição), sem alterar nada —
 cada item sai como ✓ ok, ≠ divergente (mostrando o que difere), faltando ou

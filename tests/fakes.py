@@ -32,6 +32,18 @@ class FakeOdoo:
             elif op == "not in":
                 if actual in value:
                     return False
+            elif op == "in":
+                if actual not in value:
+                    return False
+            elif op == "!=":
+                if actual == value:
+                    return False
+            elif op == ">=":
+                if not (actual is not None and actual >= value):
+                    return False
+            elif op == "<=":
+                if not (actual is not None and actual <= value):
+                    return False
             else:
                 raise NotImplementedError(f"operador não suportado no fake: {op}")
         return True
@@ -101,6 +113,19 @@ class FakeJira:
 
     def get_issue(self, issue_id, fields=("summary", "project")):
         return self.issues[str(issue_id)]
+
+    def search_issues(self, jql, fields=("summary", "project")):
+        # o fake ignora a JQL: devolve toda issue que tenha ao menos um worklog
+        with_worklogs = {w["issueId"] for w in self.worklogs.values()}
+        return [
+            dict(issue, id=issue_id)
+            for issue_id, issue in self.issues.items()
+            if issue_id in with_worklogs
+        ]
+
+    def issue_worklogs(self, issue_key):
+        ids = {issue_id for issue_id, issue in self.issues.items() if issue["key"] == issue_key}
+        return [w for w in self.worklogs.values() if w["issueId"] in ids]
 
 
 def make_worklog(
