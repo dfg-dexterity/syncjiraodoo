@@ -24,10 +24,19 @@ na ordem, sem exceção:
 2. **Horas**: **sempre perguntar ao Diego** quantas horas apontar em cada
    tarefa (nunca estimar por conta própria) e registrar o worklog na
    tarefa com `addWorklogToJiraIssue`.
-3. **Notion**: atualizar o manual do usuário **TI-14-005 — Integração
+3. **Passos manuais do Diego**: sempre que uma entrega depender de uma
+   ação que só o Diego pode fazer (atualizar o servidor, criar projetos no
+   Odoo, gerar um token, configurar algo pela tela…), criar **uma Tarefa
+   por passo** no mesmo épico JI-254, com resumo
+   `[Sincronizador de Horas] [Manual step] <o que fazer>`, descrição com
+   o passo a passo (comandos prontos para colar) e **data de vencimento
+   (`duedate`) igual ao dia da criação**. A única exceção é o "mergear"
+   do PR, que não vira tarefa. Nunca deixar um passo manual só na
+   conversa.
+4. **Notion**: atualizar o manual do usuário **TI-14-005 — Integração
    Jira + Odoo** (página `3abc69371e1780e68214d5e8bac70285`): mapa da
    tela (seção 3) e a seção da funcionalidade afetada.
-4. **Teams**: avisar o time no canal **Avisos Gerais** (team
+5. **Teams**: avisar o time no canal **Avisos Gerais** (team
    "Dexterity - Geral", `teamId 16c14e6a-955a-49df-a36e-7b35a0e29098`,
    `channelId 19:a5797f7659e142e5b348c5e2755f272e@thread.tacv2`), no mesmo
    formato usado para o Dexterity Hub / Jira Insights:
