@@ -124,3 +124,34 @@ class JiraClient:
                 "GET", f"/rest/api/3/issue/{key}", params={"fields": ",".join(fields)}
             )
         return self._issue_cache[key]
+
+    def search_issues(self, jql: str, fields: tuple[str, ...] = ("summary", "project")) -> list[dict]:
+        """Todas as issues de uma JQL (POST /rest/api/3/search/jql, paginado
+        por nextPageToken)."""
+        issues: list[dict] = []
+        token: str | None = None
+        while True:
+            body: dict = {"jql": jql, "fields": list(fields), "maxResults": 100}
+            if token:
+                body["nextPageToken"] = token
+            page = self._request("POST", "/rest/api/3/search/jql", body=body) or {}
+            issues.extend(page.get("issues", []))
+            token = page.get("nextPageToken")
+            if not token or page.get("isLast"):
+                return issues
+
+    def issue_worklogs(self, issue_key: str) -> list[dict]:
+        """Todos os worklogs de uma issue (GET /issue/{key}/worklog, paginado)."""
+        worklogs: list[dict] = []
+        start = 0
+        while True:
+            page = self._request(
+                "GET",
+                f"/rest/api/3/issue/{issue_key}/worklog",
+                params={"startAt": start, "maxResults": 1000},
+            ) or {}
+            values = page.get("worklogs", [])
+            worklogs.extend(values)
+            start += len(values)
+            if not values or start >= int(page.get("total", 0)):
+                return worklogs

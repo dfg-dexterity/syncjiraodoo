@@ -9,9 +9,11 @@ from pathlib import Path
 DEFAULT_STATE_FILE = ".sync_state.json"
 DEFAULT_HISTORY_FILE = ".sync_history.json"
 DEFAULT_IMPORT_LOG_FILE = ".sync_import_log.jsonl"
+DEFAULT_CLOSINGS_FILE = ".sync_closings.json"
 DEFAULT_LOOKBACK_DAYS = 7
 HISTORY_KEEP = 200
 IMPORT_LOG_KEEP = 5000
+CLOSINGS_KEEP = 120
 
 
 def load_since(explicit: str | None, state_path: Path) -> datetime:
@@ -63,3 +65,21 @@ def read_import_log(path: Path, limit: int = 500) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return entries
+
+
+def read_closings(path: Path) -> list[dict]:
+    """Fechamentos gravados, do mais recente para o mais antigo."""
+    if not path.exists():
+        return []
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+
+
+def save_closing(path: Path, record: dict, keep: int = CLOSINGS_KEEP) -> None:
+    """Grava um fechamento; refazer o mesmo período substitui o anterior."""
+    record = dict(record, id=f"{record['kind']}:{record['start']}")
+    closings = [c for c in read_closings(path) if c.get("id") != record["id"]]
+    closings.insert(0, record)
+    path.write_text(json.dumps(closings[:keep], ensure_ascii=False), encoding="utf-8")

@@ -23,9 +23,11 @@ from urllib.parse import parse_qs, urlparse
 
 import time
 import webbrowser
+from datetime import date
 from http.cookies import SimpleCookie
 
 from . import auth, storage
+from .closing import PERIOD_KINDS, PeriodClosing
 from .config import Config, ConfigError
 from .envfile import DEFAULT_ENV_FILE, load_env_file, save_env_file
 from .github_client import DEFAULT_BUG_REPO, GitHubError, create_issue
@@ -82,6 +84,7 @@ class SyncRunner:
         self.state_path = state_path
         self.history_path = history_path
         self.import_log_path = import_log_path or Path(storage.DEFAULT_IMPORT_LOG_FILE)
+        self.closings_path = Path(storage.DEFAULT_CLOSINGS_FILE)
         self.env_path = env_path or Path(DEFAULT_ENV_FILE)
         self.schedule_path = Path(DEFAULT_SCHEDULE_FILE)
         self.lock = threading.Lock()
@@ -164,6 +167,28 @@ class SyncRunner:
             return False
         threading.Thread(target=self._execute_audit, args=(since_str,), daemon=True).start()
         return True
+
+    def start_closing(self, kind: str, ref: date, by: str) -> bool:
+        if not self._acquire():
+            return False
+        threading.Thread(
+            target=self._execute_closing, args=(kind, ref, by), daemon=True
+        ).start()
+        return True
+
+    def _execute_closing(self, kind: str, ref: date, by: str) -> None:
+        record: dict = {"kind": kind, "start": ref.isoformat(), "finished_utc": None, "by": by}
+        try:
+            engine = self._build_engine()
+            record.update(PeriodClosing(engine).run(kind, ref))
+            record["error"] = None
+        except Exception as exc:
+            log.error("fechamento falhou: %s", exc)
+            record.update(error=str(exc), ok=False, label=f"{kind} {ref.isoformat()}")
+        finally:
+            record["finished_utc"] = datetime.now(timezone.utc).isoformat()
+            storage.save_closing(self.closings_path, record)
+            self._release()
 
     def start_reimport(self, worklog_ids: list) -> bool:
         if not self._acquire():
@@ -345,6 +370,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         runner = self.server.runner
         user = self._current_user()
+        parsed = urlparse(self.path)
         if self.path == "/":
             self._send_html(INDEX_HTML if user else LOGIN_HTML)
             return
@@ -369,6 +395,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/audit":
             self._send_json({"running": runner.running, "audit": runner.audit})
+            return
+        if parsed.path == "/api/closings":
+            closings = storage.read_closings(runner.closings_path)
+            wanted = (parse_qs(parsed.query).get("id") or [None])[0]
+            summaries = [
+                {k: c.get(k) for k in (
+                    "id", "kind", "start", "end", "label", "finished_utc", "by",
+                    "jira_hours", "odoo_hours", "diff", "ok", "error", "n_worklogs",
+                )}
+                for c in closings
+            ]
+            detail = None
+            for closing in closings:
+                if wanted is None or closing.get("id") == wanted:
+                    detail = closing
+                    break
+            self._send_json({"running": runner.running, "closings": summaries, "detail": detail})
             return
         if self.path == "/api/users":
             if not user["admin"]:
@@ -498,6 +541,23 @@ class Handler(BaseHTTPRequestHandler):
             log.info("agenda de sincronização alterada por %s: %s", user["email"], schedule)
             due = next_due(schedule, datetime.now(timezone.utc))
             self._send_json({"ok": True, "next_utc": due.isoformat() if due else None})
+            return
+        if self.path == "/api/closing":
+            data = self._read_json()
+            kind = str(data.get("kind", "")).strip().lower()
+            if kind not in PERIOD_KINDS:
+                self._send_json({"ok": False, "error": "tipo de período inválido (dia, semana ou mes)"}, 400)
+                return
+            try:
+                ref = date.fromisoformat(str(data.get("date", "")).strip())
+            except ValueError:
+                self._send_json({"ok": False, "error": "informe a data de referência"}, 400)
+                return
+            if not runner.start_closing(kind, ref, user["email"]):
+                self._send_json({"ok": False, "error": "já existe uma execução em andamento"}, 409)
+                return
+            log.info("fechamento (%s, %s) solicitado por %s", kind, ref.isoformat(), user["email"])
+            self._send_json({"ok": True})
             return
         if self.path == "/api/audit":
             data = self._read_json()
@@ -896,6 +956,7 @@ INDEX_HTML = r"""<!doctype html>
 <nav class="tabs"><div class="tabs-inner">
   <button class="tab" data-page="sync">▶ Sincronizar</button>
   <button class="tab" data-page="audit">🔍 Conferência</button>
+  <button class="tab" data-page="closing">📅 Fechamento</button>
   <button class="tab" data-page="mapping">🗺️ De-para</button>
   <button class="tab" data-page="activity">📋 Atividade</button>
   <button class="tab" data-page="settings">⚙️ Configurações</button>
@@ -1124,6 +1185,70 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </section>
 
+<!-- ============ FECHAMENTO ============ -->
+<section class="card" data-page="closing">
+  <h2>Fechamento de período</h2>
+  <p class="sub">Soma as horas apontadas no <b>Clockwork Pro</b> e as gravadas no <b>Odoo</b> em um
+  dia, semana ou mês, e compara projeto a projeto e pessoa a pessoa. Qualquer diferença aparece
+  nominalmente. <b>Nada é alterado</b> — é a garantia de que tudo foi sincronizado nos projetos certos.</p>
+  <div class="actions">
+    <select id="clKind" style="font:inherit; font-size:.86rem; padding:.4rem .6rem; border:1px solid var(--line-strong); border-radius:8px">
+      <option value="dia">dia</option>
+      <option value="semana" selected>semana</option>
+      <option value="mes">mês</option>
+    </select>
+    <input type="date" id="clDate">
+    <button id="btnClosing">📅 Fechar período</button>
+    <span id="clMsg" style="font-size:.85rem"></span>
+  </div>
+
+  <div id="clResult" style="display:none">
+    <p id="clHeadline" style="margin:1rem 0 .4rem; font-weight:600"></p>
+    <div class="summary">
+      <div class="stat"><b id="clJira">–</b><span>horas no Clockwork</span></div>
+      <div class="stat"><b id="clOdoo">–</b><span>horas no Odoo</span></div>
+      <div class="stat"><b id="clDiff">–</b><span>diferença (Odoo − Clockwork)</span></div>
+      <div class="stat"><b id="clProblems">–</b><span>itens com problema</span></div>
+    </div>
+    <div id="clErrBox" style="display:none; margin-top:.8rem; padding:.7rem .95rem; border-radius:10px; background:var(--err-bg); color:var(--err); font-size:.84rem; white-space:pre-wrap"></div>
+
+    <h3 style="font-size:.92rem; margin:1.2rem 0 .4rem">Por projeto</h3>
+    <div class="table-wrap">
+    <table id="clProjects">
+      <thead><tr><th>Projeto (Odoo)</th><th>Clockwork</th><th>Odoo</th><th>Diferença</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    </div>
+
+    <h3 style="font-size:.92rem; margin:1.2rem 0 .4rem">Por pessoa</h3>
+    <div class="table-wrap">
+    <table id="clPeople">
+      <thead><tr><th>Pessoa</th><th>Clockwork</th><th>Odoo</th><th>Diferença</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    </div>
+
+    <h3 style="font-size:.92rem; margin:1.2rem 0 .4rem">Diferenças encontradas
+      <span class="muted" id="clItemsCount"></span></h3>
+    <div class="table-wrap">
+    <table id="clItems">
+      <thead><tr><th>Situação</th><th>Issue</th><th>Pessoa</th><th>Data</th>
+      <th>Clockwork</th><th>Odoo</th><th>Projeto esperado</th><th>Projeto no Odoo</th><th>Detalhe</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    </div>
+  </div>
+
+  <h3 style="font-size:.92rem; margin:1.4rem 0 .4rem">Fechamentos anteriores
+    <span class="muted">(clique para rever)</span></h3>
+  <div class="table-wrap">
+  <table id="clHistory">
+    <thead><tr><th>Período</th><th>Fechado em</th><th>Por</th><th>Clockwork</th><th>Odoo</th><th>Diferença</th><th>Situação</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  </div>
+</section>
+
 <!-- ============ ATIVIDADE ============ -->
 <section class="card" data-page="activity">
   <h2>Atividade</h2>
@@ -1168,7 +1293,7 @@ let importLog = [];
 let currentPage = "sync";
 
 /* ---------- navegação por abas ---------- */
-const PAGES = ["sync", "audit", "mapping", "activity", "settings"];
+const PAGES = ["sync", "audit", "closing", "mapping", "activity", "settings"];
 
 function renderPages() {
   for (const section of document.querySelectorAll("section[data-page]")) {
@@ -1481,6 +1606,132 @@ document.getElementById("btnSchedSave").addEventListener("click", async () => {
   } else show("schedMsg", data.error || "não foi possível salvar", "err-text");
 });
 
+/* ---------- fechamento de período ---------- */
+let closingWatch = false;
+const CL_STATUS = {
+  faltando: ["falta no Odoo", "err-text"],
+  divergente: ["≠ divergente", "warn-text"],
+  sem_destino: ["sem destino no Odoo", "err-text"],
+  duplicado: ["duplicado no Odoo", "err-text"],
+  so_odoo: ["só no Odoo", "warn-text"],
+  manual: ["manual no Odoo", "warn-text"],
+};
+const fmtH = h => (h == null ? "—" : Number(h).toFixed(2) + "h");
+const fmtDiff = d => (Math.abs(d) < 0.005 ? "0,00h" : (d > 0 ? "+" : "") + Number(d).toFixed(2) + "h");
+
+function renderClosingTotals(tableId, rows, key) {
+  const body = document.querySelector("#" + tableId + " tbody");
+  body.innerHTML = "";
+  for (const row of rows) {
+    const tr = el("tr");
+    tr.appendChild(el("td", {}, row[key] || "—"));
+    tr.appendChild(el("td", {}, fmtH(row.jira)));
+    tr.appendChild(el("td", {}, fmtH(row.odoo)));
+    const ok = Math.abs(row.diff) < 0.005;
+    const diff = el("td", {}, fmtDiff(row.diff));
+    diff.className = ok ? "ok-text" : "err-text";
+    tr.appendChild(diff);
+    tr.appendChild(el("td", {}, ok ? "✓" : "≠")).className = ok ? "ok-text" : "err-text";
+    body.appendChild(tr);
+  }
+  if (!rows.length) { const tr = el("tr"); tr.appendChild(el("td", { colSpan: 5 }, "nenhuma hora no período")); body.appendChild(tr); }
+}
+
+function renderClosing(record) {
+  const box = document.getElementById("clResult");
+  if (!record) { box.style.display = "none"; return; }
+  box.style.display = "block";
+  const head = document.getElementById("clHeadline");
+  if (record.error) {
+    head.textContent = "✕ fechamento do " + record.label + " falhou: " + record.error;
+    head.className = "err-text";
+    return;
+  }
+  const problems = Object.entries(record.counts || {})
+    .filter(([s]) => s !== "ok").reduce((n, [, v]) => n + v, 0);
+  head.textContent = record.ok
+    ? "✓ " + record.label + ": Clockwork Pro e Odoo batem (" + record.n_worklogs + " apontamentos conferidos)"
+    : "⚠ " + record.label + ": " + problems + " item(ns) com diferença — veja a lista abaixo";
+  head.className = record.ok ? "ok-text" : "err-text";
+  document.getElementById("clJira").textContent = fmtH(record.jira_hours);
+  document.getElementById("clOdoo").textContent = fmtH(record.odoo_hours);
+  const diffEl = document.getElementById("clDiff");
+  diffEl.textContent = fmtDiff(record.diff);
+  diffEl.className = Math.abs(record.diff) < 0.005 ? "ok-text" : "err-text";
+  document.getElementById("clProblems").textContent = problems;
+  const errBox = document.getElementById("clErrBox");
+  const notes = [...(record.errors || []), ...(record.warnings || [])];
+  errBox.style.display = notes.length ? "block" : "none";
+  errBox.textContent = notes.length ? "• " + notes.join("\n• ") : "";
+
+  renderClosingTotals("clProjects", record.projects || [], "projeto");
+  renderClosingTotals("clPeople", record.people || [], "pessoa");
+
+  const items = record.items || [];
+  document.getElementById("clItemsCount").textContent = items.length ? "(" + items.length + ")" : "(nenhuma 🎉)";
+  const body = document.querySelector("#clItems tbody");
+  body.innerHTML = "";
+  for (const item of items) {
+    const [label, cls] = CL_STATUS[item.status] || [item.status, ""];
+    const tr = el("tr");
+    tr.appendChild(el("td", {}, label)).className = cls;
+    tr.appendChild(el("td", {}, item.issue || "—"));
+    tr.appendChild(el("td", {}, item.pessoa || "—"));
+    tr.appendChild(el("td", {}, item.data || "—"));
+    tr.appendChild(el("td", {}, fmtH(item.horas_jira)));
+    tr.appendChild(el("td", {}, fmtH(item.horas_odoo)));
+    tr.appendChild(el("td", {}, item.projeto_esperado || "—"));
+    tr.appendChild(el("td", {}, item.projeto_odoo || "—"));
+    tr.appendChild(el("td", {}, item.detalhe || item.descricao || ""));
+    body.appendChild(tr);
+  }
+}
+
+function renderClosingHistory(closings) {
+  const body = document.querySelector("#clHistory tbody");
+  body.innerHTML = "";
+  for (const c of closings) {
+    const tr = el("tr", { style: "cursor:pointer" });
+    tr.title = "clique para rever este fechamento";
+    tr.appendChild(el("td", {}, c.label || c.id));
+    tr.appendChild(el("td", {}, c.finished_utc ? new Date(c.finished_utc).toLocaleString() : "—"));
+    tr.appendChild(el("td", {}, c.by || "—"));
+    tr.appendChild(el("td", {}, fmtH(c.jira_hours)));
+    tr.appendChild(el("td", {}, fmtH(c.odoo_hours)));
+    tr.appendChild(el("td", {}, c.diff == null ? "—" : fmtDiff(c.diff)));
+    const st = el("td", {}, c.error ? "✕ erro" : c.ok ? "✓ batem" : "≠ diferenças");
+    st.className = c.error ? "err-text" : c.ok ? "ok-text" : "warn-text";
+    tr.appendChild(st);
+    tr.addEventListener("click", () => loadClosings(c.id));
+    body.appendChild(tr);
+  }
+  if (!closings.length) { const tr = el("tr"); tr.appendChild(el("td", { colSpan: 7 }, "nenhum fechamento ainda")); body.appendChild(tr); }
+}
+
+async function loadClosings(id) {
+  try {
+    const url = "/api/closings" + (id ? "?id=" + encodeURIComponent(id) : "");
+    const data = await (await fetch(url)).json();
+    renderClosingHistory(data.closings || []);
+    if (!data.running) renderClosing(data.detail);
+    if (id) document.getElementById("clResult").scrollIntoView({ behavior: "smooth" });
+  } catch (e) { /* servidor ocupado */ }
+}
+
+document.getElementById("btnClosing").addEventListener("click", async () => {
+  const kind = document.getElementById("clKind").value;
+  const dateValue = document.getElementById("clDate").value;
+  if (!dateValue) { show("clMsg", "escolha a data de referência", "err-text"); return; }
+  const res = await fetch("/api/closing", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind, date: dateValue }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data.ok) { closingWatch = true; show("clMsg", "fechando… (um mês inteiro pode levar alguns minutos)", ""); }
+  else show("clMsg", data.error || "não foi possível iniciar", "err-text");
+});
+document.getElementById("clDate").value = new Date().toISOString().slice(0, 10);
+
 /* ---------- conferência Jira × Odoo ---------- */
 let auditWatch = false;
 let reimportPending = null;
@@ -1684,6 +1935,7 @@ async function refresh() {
     if (wasRunning && !state.running) {
       loadImportLog();
       if (auditWatch) { auditWatch = false; loadAudit(); }
+      if (closingWatch) { closingWatch = false; loadClosings(); }
       if (reimportPending) {
         // marca os itens reimportados na tabela; o botão Conferir confirma no Odoo
         for (const item of auditItems)
@@ -1754,6 +2006,7 @@ showPage(location.hash.replace("#", "") || "sync");
 loadConfig();
 loadImportLog();
 loadAudit();
+loadClosings();
 loadSchedule();
 refresh();
 setInterval(refresh, 2500);
@@ -1778,6 +2031,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-file", default=DEFAULT_ENV_FILE)
     parser.add_argument("--users-file", default=auth.DEFAULT_USERS_FILE)
     parser.add_argument("--schedule-file", default=DEFAULT_SCHEDULE_FILE)
+    parser.add_argument("--closings-file", default=storage.DEFAULT_CLOSINGS_FILE)
     parser.add_argument(
         "--add-user",
         metavar="EMAIL",
@@ -1810,6 +2064,7 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.env_file),
     )
     runner.schedule_path = Path(args.schedule_file)
+    runner.closings_path = Path(args.closings_file)
     Scheduler(runner, runner.schedule_path).start()
     server = App((args.host, args.port), runner, Path(args.users_file))
     url = f"http://{args.host}:{server.server_address[1]}/"

@@ -6,6 +6,7 @@
 .sync_run.log*
 .users.json
 .sync_schedule.json
+.sync_closings.json
 
 # Python
 __pycache__/

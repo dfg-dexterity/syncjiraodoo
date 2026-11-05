@@ -38,6 +38,7 @@ class WebTest(unittest.TestCase):
             self.env_path,
         )
         self.runner.schedule_path = base / "schedule.json"
+        self.runner.closings_path = base / "closings.json"
         self.server = App(("127.0.0.1", 0), self.runner, self.users_path)
         self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -353,3 +354,39 @@ class CssHiddenElementsTest(unittest.TestCase):
             self.assertNotIn(
                 f'getElementById("{element_id}").style.display = ""', html, element_id
             )
+
+
+class ClosingEndpointsTest(WebTest):
+    def test_closings_empty_initially(self):
+        status, data = self._request("/api/closings")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["closings"], [])
+        self.assertIsNone(data["detail"])
+
+    def test_closing_validates_input(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/closing", {"kind": "ano", "date": "2026-06-08"})
+        self.assertEqual(ctx.exception.code, 400)
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/closing", {"kind": "dia", "date": "ontem"})
+        self.assertEqual(ctx.exception.code, 400)
+
+    def test_closing_requires_login(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._request("/api/closings", cookie=None)
+        self.assertEqual(ctx.exception.code, 401)
+
+    def test_closings_detail_by_id(self):
+        storage.save_closing(self.runner.closings_path, {
+            "kind": "dia", "start": "2026-06-08", "label": "dia 08/06/2026", "ok": True,
+            "jira_hours": 1.0, "odoo_hours": 1.0, "diff": 0.0, "items": [],
+        })
+        storage.save_closing(self.runner.closings_path, {
+            "kind": "mes", "start": "2026-06-01", "label": "mês 06/2026", "ok": False,
+            "jira_hours": 10.0, "odoo_hours": 9.0, "diff": -1.0, "items": [{"status": "faltando"}],
+        })
+        status, data = self._request("/api/closings")
+        self.assertEqual([c["id"] for c in data["closings"]], ["mes:2026-06-01", "dia:2026-06-08"])
+        self.assertEqual(data["detail"]["id"], "mes:2026-06-01")
+        status, data = self._request("/api/closings?id=dia:2026-06-08")
+        self.assertEqual(data["detail"]["label"], "dia 08/06/2026")
